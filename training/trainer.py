@@ -34,7 +34,7 @@ def train_adios_tme(args):
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
     print("Starting ADIOS-TME training")
-    
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     # ============ Create models ============
     
     # Student encoder
@@ -138,6 +138,13 @@ def train_adios_tme(args):
         lr=args.lr * 0.1,
         weight_decay=args.weight_decay
     )
+
+    lr_schedule = utils.cosine_scheduler(
+        base_value=args.lr,
+        final_value=args.min_lr,
+        total_iters=args.total_iterations,
+        warmup_iters=args.warmup_iterations,
+    )
     
     # ============ Create dataset ============
     dataset = ADIOSPathologyDataset(
@@ -146,17 +153,39 @@ def train_adios_tme(args):
         img_size=args.img_size,
         max_samples=None,
     )
+
+    sampler = torch.utils.data.DistributedSampler(
+        dataset,
+        num_replicas=dist.get_world_size(),
+        rank=args.gpu,
+        shuffle=True
+    )
     
     data_loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
+        sampler=sampler, 
         drop_last=True,
         pin_memory=True,
         persistent_workers=True,
         worker_init_fn=worker_init_fn
     )
     
+    # Resume from checkpoint if exists
+    to_restore = {"iteration": 0}
+    utils.restart_from_checkpoint(
+        os.path.join(args.output_dir, "checkpoint.pth"),
+        run_variables=to_restore,
+        student=student,
+        mask_model=mask_model,
+        reconstructor=reconstructor,
+        student_optimizer=student_optimizer,
+        mask_optimizer=mask_optimizer,
+        reconstructor_optimizer=reconstructor_optimizer,
+    )
+    start_iteration = to_restore["iteration"]
+
     # ============ Training loop ============
     iteration = 0
     metric_logger = utils.IterationMetricLogger(total_iterations=args.total_iterations)
@@ -167,6 +196,10 @@ def train_adios_tme(args):
             
         # Get original image (last in the batch)
         original_image = data.cuda(non_blocking=True)
+
+        # Update learning rate
+        for param_group in student_optimizer.param_groups:
+            param_group['lr'] = lr_schedule[iteration]
         
         # ========== Phase 1: Generate masks ==========
         with torch.no_grad():
@@ -270,6 +303,9 @@ def train_adios_tme(args):
                 'student': student.state_dict(),
                 'mask_model': mask_model.state_dict(),
                 'reconstructor': reconstructor.state_dict(),
+                'student_optimizer': student_optimizer.state_dict(),
+                'mask_optimizer': mask_optimizer.state_dict(),
+                'reconstructor_optimizer': reconstructor_optimizer.state_dict(),
                 'iteration': iteration,
                 'args': args,
             }
