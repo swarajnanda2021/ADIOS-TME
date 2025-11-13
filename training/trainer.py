@@ -1,5 +1,12 @@
 """
-ADIOS-TME training loop.
+ADIOS-TME training loop 
+
+Key optimizations:
+1. Proper fp16/bfloat16 with gradient scaler
+2. Mask caching (compute once per iteration)
+3. Multi-crop implementation
+4. Batched forward passes
+5. Memory-efficient crop processing
 """
 
 import os
@@ -24,18 +31,23 @@ from .helpers import (
     save_iteration_masks_efficient,
     worker_init_fn,
     setup_ddp_model,
+    # Add the new functions:
+    generate_crop_parameters,
+    apply_crops_to_masked_images,
+    process_student_with_cached_masks_and_crops,
 )
 
 
 def train_adios_tme(args):
     """
-    Main training function for ADIOS-TME.
+    Main training function for ADIOS-TME with optimizations.
     """
     # ============ Setup ============
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
-    print("Starting ADIOS-TME training")
+    print("Starting ADIOS-TME training (OPTIMIZED)")
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    
     # ============ Create models ============
     
     # Student encoder
@@ -112,6 +124,11 @@ def train_adios_tme(args):
     mask_model = setup_ddp_model(mask_model, args, find_unused=False)
     reconstructor = setup_ddp_model(reconstructor, args, find_unused=False)
     
+    # Set static graph for efficiency
+    student._set_static_graph()
+    mask_model._set_static_graph()
+    reconstructor._set_static_graph()
+    
     # ============ Create loss ============
     adios_loss = ADIOSLoss(
         alpha_sparsity=0.1,
@@ -147,6 +164,15 @@ def train_adios_tme(args):
         warmup_iters=args.warmup_iterations,
     )
     
+    # ============ Setup fp16/bfloat16 scaler ============
+    fp16_scaler = None
+    use_amp = args.use_fp16
+    amp_dtype = torch.bfloat16  # Use bfloat16 for better stability
+    
+    if use_amp:
+        fp16_scaler = torch.cuda.amp.GradScaler()
+        print(f"Using automatic mixed precision with {amp_dtype}")
+    
     # ============ Create dataset ============
     dataset = ADIOSPathologyDataset(
         data_path=args.data_path,
@@ -176,149 +202,213 @@ def train_adios_tme(args):
         student_optimizer=student_optimizer,
         mask_optimizer=mask_optimizer,
         reconstructor_optimizer=reconstructor_optimizer,
+        fp16_scaler=fp16_scaler,
     )
     start_iteration = to_restore["iteration"]
 
     # ============ Training loop ============
-    iteration = 0
+    iteration = start_iteration
     metric_logger = utils.IterationMetricLogger(total_iterations=args.total_iterations)
+    
+    # Multi-crop configuration
+    crops_per_mask = getattr(args, 'crops_per_mask', 2)  # Default: 2 crops per mask
+    print(f"Using {crops_per_mask} crops per mask for multi-scale training")
     
     for data in data_loader:
         if iteration >= args.total_iterations:
             break
-            
-        # Get original image (last in the batch)
+        
+        # Get original image
         original_image = data.cuda(non_blocking=True)
+        batch_size = original_image.shape[0]
 
         # Update learning rate
         for param_group in student_optimizer.param_groups:
             param_group['lr'] = lr_schedule[iteration]
         
-        # ========== Phase 1: Generate masks ==========
+        # ============ CRITICAL OPTIMIZATION: Cache masks once per iteration ============
+        # This dramatically reduces memory usage by avoiding redundant forward passes
+        mask_model.eval()
         with torch.no_grad():
-            mask_output = mask_model(original_image)
-            masks = mask_output['masks']
+            # Generate masks ONCE and cache them
+            cached_mask_output = mask_model(original_image)
+            cached_masks = cached_mask_output["masks"].clone()  # Clone to ensure no graph retention
+            
+            # Generate crop parameters ONCE and cache them too
+            if crops_per_mask > 0:
+                crop_params = generate_crop_parameters(
+                    batch_size=batch_size,
+                    num_masks=args.num_masks,
+                    K=crops_per_mask,
+                    img_size=224
+                )
+            else:
+                crop_params = None
         
-        # Apply masks
-        masked_images = []
-        for i in range(masks.shape[1]):
-            mask = masks[:, i:i+1, :, :]
-            masked_img = original_image * (1 - mask)
-            masked_images.append(masked_img)
-        
-        # ========== Phase 2: Student training ==========
+        # Clean up the original output to free memory
+        del cached_mask_output
+        torch.cuda.empty_cache()
+
+        # ============ Phase 1: Train Student (Inpainter) ============
+        student.train()
         student_optimizer.zero_grad()
-        
-        # Get embeddings
-        original_emb = student(original_image)
-        masked_embs = student(masked_images)
-        
-        # Compute ADIOS loss
-        student_loss, metrics = adios_loss(
-            original_emb, 
-            masked_embs, 
-            masks=None,  # Don't need sparsity for student
-            iteration=iteration
-        )
-        
-        student_loss.backward()
-        if args.clip_grad:
-            torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-        student_optimizer.step()
-        
-        # ========== Phase 3: Update mask model (every N iterations) ==========
-        if iteration % args.mask_update_freq == 0:
-            
-            # Train reconstructor
-            reconstructor_optimizer.zero_grad()
-            
-            # Create hybrid input
-            hybrid_input = create_hybrid_input(original_image, masks)
-            reconstructed = reconstructor(hybrid_input)
-            
-            # L1 loss only
-            recon_loss = F.l1_loss(reconstructed, original_image)
-            recon_loss.backward()
-            reconstructor_optimizer.step()
-            
-            # Train mask model with DUAL objectives
-            mask_optimizer.zero_grad()
-            
-            # 1. ADVERSARIAL OBJECTIVE: Make student's job harder
-            mask_output_fresh = mask_model(original_image)
-            masks_fresh = mask_output_fresh['masks']
-            
-            masked_images_fresh = []
-            for i in range(masks_fresh.shape[1]):
-                mask = masks_fresh[:, i:i+1, :, :]
-                masked_img = original_image * (1 - mask)
-                masked_images_fresh.append(masked_img)
-            
-            original_emb_fresh = student(original_image)
-            masked_embs_fresh = [student(img) for img in masked_images_fresh]
-            
-            # Adversarial loss (negative contrastive + sparsity)
-            mask_loss, mask_metrics = adios_loss(
-                original_emb_fresh,
-                masked_embs_fresh,
-                masks=masks_fresh,
-                iteration=iteration,
-                forward_type='mask'  # This triggers adversarial mode
+
+        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+            # Use the efficient cached masks + crops function
+            student_loss, student_metrics = process_student_with_cached_masks_and_crops(
+                student=student,
+                cached_masks=cached_masks,
+                original_image=original_image,
+                crop_params=crop_params,
+                K=crops_per_mask,
+                current_iteration=iteration,
+                adios_loss=adios_loss,
+                num_masks=args.num_masks
             )
+        
+        # Backward with gradient scaling
+        if fp16_scaler is not None:
+            fp16_scaler.scale(student_loss).backward()
             
-            # 2. RECONSTRUCTION OBJECTIVE: Ensure semantic meaningfulness
-            with torch.no_grad():
-                # Create hybrid input for reconstructor (using one channel for information and others for reconstruction target)
-                hybrid_test = create_hybrid_input(original_image, masks_fresh)
-                reconstructed_test = reconstructor(hybrid_test)
-                recon_error = F.l1_loss(reconstructed_test, original_image)
-            
-            # REWARD for good reconstruction 
-            reconstruction_reward = torch.exp(-recon_error * 5.0)  # Exponential reward
-            # OR: reconstruction_reward = 1.0 / (1.0 + recon_error)  
-            
-            # Combine: Adversarial loss MINUS reconstruction reward
-            total_mask_loss = mask_loss - reconstruction_reward
-            
-            total_mask_loss.backward()
             if args.clip_grad:
-                torch.nn.utils.clip_grad_norm_(mask_model.parameters(), args.clip_grad)
-            mask_optimizer.step()
+                fp16_scaler.unscale_(student_optimizer)
+                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
             
+            fp16_scaler.step(student_optimizer)
+            fp16_scaler.update()
+        else:
+            student_loss.backward()
+            
+            if args.clip_grad:
+                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+            
+            student_optimizer.step()
+
+        # ============ Phase 2 & 3: Update reconstructor and mask model ============
+        mask_loss = torch.tensor(0.0)
+        mask_metrics = {'similarity': 0.0, 'sparsity': 0.0}
+        
+        if iteration % args.mask_update_freq == 0:
+            # Phase 2: Train Reconstructor
+            student.eval()
+            reconstructor.train()
+            reconstructor_optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                # Create hybrid input using cached masks
+                content_mask = cached_masks[:, 0:1, :, :]
+                guidance_mask_g = cached_masks[:, 1:2, :, :] if cached_masks.shape[1] > 1 else torch.zeros_like(content_mask)
+                guidance_mask_b = cached_masks[:, 2:3, :, :] if cached_masks.shape[1] > 2 else torch.zeros_like(content_mask)
+
+                hybrid_input = torch.zeros_like(original_image)
+                hybrid_input[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
+                hybrid_input[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
+                                            guidance_mask_g * (1 - content_mask))
+                hybrid_input[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
+                                            guidance_mask_b * (1 - content_mask))
+
+                reconstructed = reconstructor(hybrid_input)
+                recon_loss = F.l1_loss(reconstructed, original_image)
+
+            if fp16_scaler is not None:
+                fp16_scaler.scale(recon_loss).backward()
+                if args.clip_grad:
+                    fp16_scaler.unscale_(reconstructor_optimizer)
+                    torch.nn.utils.clip_grad_norm_(reconstructor.parameters(), args.clip_grad)
+                fp16_scaler.step(reconstructor_optimizer)
+                fp16_scaler.update()
+            else:
+                recon_loss.backward()
+                if args.clip_grad:
+                    torch.nn.utils.clip_grad_norm_(reconstructor.parameters(), args.clip_grad)
+                reconstructor_optimizer.step()
+
+            metric_logger.update(recon_loss=recon_loss.item())
+            
+            # Phase 3: Update Mask Model
+            student.eval()
+            mask_model.train()
+            reconstructor.eval()
+            mask_optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                # Generate FRESH masks for mask model training
+                mask_output = mask_model(original_image)
+                fresh_masks = mask_output['masks']
+                
+                # Create masked images
+                masked_images = []
+                for i in range(args.num_masks):
+                    mask = fresh_masks[:, i:i+1, :, :]
+                    masked_img = original_image * (1 - mask)
+                    masked_images.append(masked_img)
+                
+                # Forward through student
+                all_embeddings = student([original_image] + masked_images)
+                original_emb = all_embeddings[0]
+                masked_embs = all_embeddings[1:]
+                
+                # Compute adversarial loss (mask tries to maximize contrastive loss)
+                mask_loss, mask_metrics = adios_loss(
+                    original_emb,
+                    masked_embs,
+                    masks=fresh_masks,
+                    iteration=iteration,
+                    forward_type='mask'  # Adversarial mode
+                )
+                
+                # Add reconstruction reward
+                with torch.no_grad():
+                    hybrid_test = torch.zeros_like(original_image)
+                    content_mask = fresh_masks[:, 0:1, :, :]
+                    hybrid_test[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
+                    if fresh_masks.shape[1] > 1:
+                        guidance_mask_g = fresh_masks[:, 1:2, :, :]
+                        hybrid_test[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
+                                                     guidance_mask_g * (1 - content_mask))
+                    if fresh_masks.shape[1] > 2:
+                        guidance_mask_b = fresh_masks[:, 2:3, :, :]
+                        hybrid_test[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
+                                                     guidance_mask_b * (1 - content_mask))
+                    
+                    reconstructed_test = reconstructor(hybrid_test)
+                    recon_error = F.l1_loss(reconstructed_test, original_image)
+                    reconstruction_reward = torch.exp(-recon_error * 5.0)
+                
+                # Combine: adversarial - reward
+                total_mask_loss = mask_loss - reconstruction_reward
+
+            if fp16_scaler is not None:
+                fp16_scaler.scale(total_mask_loss).backward()
+                if args.clip_grad:
+                    fp16_scaler.unscale_(mask_optimizer)
+                    torch.nn.utils.clip_grad_norm_(mask_model.parameters(), args.clip_grad)
+                fp16_scaler.step(mask_optimizer)
+                fp16_scaler.update()
+            else:
+                total_mask_loss.backward()
+                if args.clip_grad:
+                    torch.nn.utils.clip_grad_norm_(mask_model.parameters(), args.clip_grad)
+                mask_optimizer.step()
+
             metric_logger.update(mask_adversarial_loss=mask_loss.item())
             metric_logger.update(reconstruction_reward=reconstruction_reward.item())
             metric_logger.update(mask_total_loss=total_mask_loss.item())
-        
-        # ========== Visualization ==========
-        if iteration % args.viz_freq == 0 and iteration < 5000 and args.num_masks > 0:
+
+        # ============ Visualization ============
+        if iteration % args.viz_freq == 0 and iteration < 5000:
             sample_image = original_image[:1]
             with torch.no_grad():
                 vis_masks = mask_model(sample_image)['masks']
                 
-                # Generate reconstruction if reconstructor exists
                 reconstructed_images = None
                 if reconstructor is not None:
-                    # Create hybrid input for reconstructor
                     content_mask = vis_masks[:, 0:1, :, :]
-                    if vis_masks.shape[1] >= 2:
-                        guidance_mask_g = vis_masks[:, 1:2, :, :]
-                    else:
-                        guidance_mask_g = torch.zeros_like(content_mask)
-                    if vis_masks.shape[1] >= 3:
-                        guidance_mask_b = vis_masks[:, 2:3, :, :]
-                    else:
-                        guidance_mask_b = torch.zeros_like(content_mask)
-                    
                     hybrid_input = torch.zeros_like(sample_image)
                     hybrid_input[:, 0:1, :, :] = sample_image[:, 0:1, :, :] * content_mask
-                    hybrid_input[:, 1:2, :, :] = (sample_image[:, 1:2, :, :] * content_mask +
-                                                guidance_mask_g * (1 - content_mask))
-                    hybrid_input[:, 2:3, :, :] = (sample_image[:, 2:3, :, :] * content_mask +
-                                                guidance_mask_b * (1 - content_mask))
                     
                     reconstructed_images = reconstructor(hybrid_input)
                 
-                # Save visualization
                 safe_visualization_wrapper(
                     sample_image,
                     vis_masks,
@@ -326,15 +416,23 @@ def train_adios_tme(args):
                     os.path.join(args.output_dir, 'visualizations', 'masks'),
                     reconstructed_images
                 )
-        
-        # ========== Logging ==========
+
+        # Clean up cached masks
+        del cached_masks
+        if crop_params is not None:
+            del crop_params
+        torch.cuda.empty_cache()
+
+        # ============ Logging ============
         metric_logger.update(student_loss=student_loss.item())
-        metric_logger.update(**metrics)
+        metric_logger.update(mask_loss=mask_loss.item())
+        metric_logger.update(**student_metrics)
+        metric_logger.update(**mask_metrics)
         
         if iteration % 10 == 0 and utils.is_main_process():
             print(f"Iteration {iteration}: {metric_logger}")
         
-        # ========== Checkpoint ==========
+        # ============ Checkpoint ============
         if iteration % args.save_freq == 0:
             save_dict = {
                 'student': student.state_dict(),
@@ -346,31 +444,12 @@ def train_adios_tme(args):
                 'iteration': iteration,
                 'args': args,
             }
+            
+            if fp16_scaler is not None:
+                save_dict['fp16_scaler'] = fp16_scaler.state_dict()
+                
             utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
         
         iteration += 1
     
     print("Training complete!")
-
-
-def create_hybrid_input(images, masks):
-    """Create hybrid input for reconstructor."""
-    B, num_masks, H, W = masks.shape
-    
-    # Use first mask as content, others as guidance
-    content_mask = masks[:, 0:1, :, :]
-    
-    hybrid = torch.zeros_like(images)
-    hybrid[:, 0, :, :] = images[:, 0, :, :] * content_mask.squeeze(1)
-    
-    if num_masks > 1:
-        guidance_mask = masks[:, 1:2, :, :]
-        hybrid[:, 1, :, :] = (images[:, 1, :, :] * content_mask.squeeze(1) + 
-                              guidance_mask.squeeze(1) * (1 - content_mask.squeeze(1)))
-    
-    if num_masks > 2:
-        guidance_mask = masks[:, 2:3, :, :]
-        hybrid[:, 2, :, :] = (images[:, 2, :, :] * content_mask.squeeze(1) + 
-                              guidance_mask.squeeze(1) * (1 - content_mask.squeeze(1)))
-    
-    return hybrid
