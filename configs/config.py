@@ -13,7 +13,7 @@ def get_args_parser():
     Returns:
         ArgumentParser with all training arguments
     """
-    parser = argparse.ArgumentParser('Semantic-DINOv2 with Sequence Packing', add_help=False)
+    parser = argparse.ArgumentParser('ADIOS-TME with Sequence Packing', add_help=False)
     
     # ========== Model parameters ==========
     parser.add_argument('--patch_size', default=16, type=int,
