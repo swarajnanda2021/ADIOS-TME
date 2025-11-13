@@ -101,37 +101,31 @@ class ADIOSLoss(nn.Module):
             penalty += (torch.sinh(torch.abs(centered_x) * math.pi) ** 2).mean()
         return penalty / masks.shape[1]
 
-    def forward(self, original_emb, masked_embs, masks=None, iteration=0):
+    def forward(self, original_emb, masked_embs, masks=None, iteration=0, 
+                forward_type='student'):
         """
-        Compute ADIOS loss.
-        
         Args:
-            original_emb: Original image embeddings [B, D]
-            masked_embs: List of masked embeddings, each [B, D]
-            masks: Optional mask tensor [B, num_masks, H, W] for sparsity
-            iteration: Current training iteration
-            
-        Returns:
-            loss: Total loss
-            metrics: Dictionary of loss components
+            forward_type: 'student' or 'mask' to control behavior
         """
         temperature = self.get_temperature(iteration)
         
         # Contrastive loss
         contrastive = self.contrastive_loss(original_emb, masked_embs, temperature)
         
-        # Total loss
-        total_loss = contrastive
-        
         metrics = {
             'contrastive': contrastive.item(),
             'temperature': temperature
         }
         
-        # Add sparsity if masks provided
-        if masks is not None:
+        if forward_type == 'student':
+            # Student: minimize contrastive loss (wants similarity)
+            total_loss = contrastive
+            
+        elif forward_type == 'mask':
+            # Mask: MAXIMIZE contrastive loss (adversarial)
             sparsity = self.sparsity_penalty(masks)
-            total_loss = total_loss + self.alpha_sparsity * sparsity
+            total_loss = -contrastive + self.alpha_sparsity * sparsity
             metrics['sparsity'] = sparsity.item()
+            metrics['adversarial_loss'] = (-contrastive).item()
         
         return total_loss, metrics

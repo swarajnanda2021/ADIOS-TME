@@ -241,10 +241,10 @@ def train_adios_tme(args):
             recon_loss.backward()
             reconstructor_optimizer.step()
             
-            # Train mask model
+            # Train mask model with DUAL objectives
             mask_optimizer.zero_grad()
             
-            # Recompute embeddings with fresh masks
+            # 1. ADVERSARIAL OBJECTIVE: Make student's job harder
             mask_output_fresh = mask_model(original_image)
             masks_fresh = mask_output_fresh['masks']
             
@@ -255,33 +255,39 @@ def train_adios_tme(args):
                 masked_images_fresh.append(masked_img)
             
             original_emb_fresh = student(original_image)
-            masked_embs_fresh = student(masked_images_fresh)
+            masked_embs_fresh = [student(img) for img in masked_images_fresh]
             
-            # ADIOS loss with sparsity
-            mask_loss, _ = adios_loss(
+            # Adversarial loss (negative contrastive + sparsity)
+            mask_loss, mask_metrics = adios_loss(
                 original_emb_fresh,
                 masked_embs_fresh,
                 masks=masks_fresh,
-                iteration=iteration
+                iteration=iteration,
+                forward_type='mask'  # This triggers adversarial mode
             )
             
-            # Add reconstruction reward
+            # 2. RECONSTRUCTION OBJECTIVE: Ensure semantic meaningfulness
             with torch.no_grad():
+                # Create hybrid input for reconstructor
                 hybrid_test = create_hybrid_input(original_image, masks_fresh)
                 reconstructed_test = reconstructor(hybrid_test)
                 recon_error = F.l1_loss(reconstructed_test, original_image)
             
-            reconstruction_reward = 1.0 / (1.0 + recon_error)
-            mask_loss = mask_loss - 0.1 * reconstruction_reward
+            # REWARD for good reconstruction 
+            reconstruction_reward = torch.exp(-recon_error * 5.0)  # Exponential reward
+            # OR: reconstruction_reward = 1.0 / (1.0 + recon_error)  
             
-            mask_loss.backward()
+            # Combine: Adversarial loss MINUS reconstruction reward
+            total_mask_loss = mask_loss - * reconstruction_reward
+            
+            total_mask_loss.backward()
             if args.clip_grad:
                 torch.nn.utils.clip_grad_norm_(mask_model.parameters(), args.clip_grad)
             mask_optimizer.step()
             
-            metric_logger.update(mask_loss=mask_loss.item())
-            metric_logger.update(recon_loss=recon_loss.item())
-            metric_logger.update(recon_reward=reconstruction_reward.item())
+            metric_logger.update(mask_adversarial_loss=mask_loss.item())
+            metric_logger.update(reconstruction_reward=reconstruction_reward.item())
+            metric_logger.update(mask_total_loss=total_mask_loss.item())
         
         # ========== Visualization ==========
         if iteration % args.viz_freq == 0 and iteration < 5000 and args.num_masks > 0:
