@@ -320,7 +320,7 @@ def setup_ddp_model(model, args, find_unused=False):
     if hasattr(args, 'grad_checkpointing') and args.grad_checkpointing:
         if hasattr(model, 'set_grad_checkpointing'):
             model.set_grad_checkpointing(True)
-            print(f"✓ Enabled gradient checkpointing before DDP wrapping")
+            print(f"Enabled gradient checkpointing before DDP wrapping")
 
     # Only wrap with DDP if using multiple GPUs
     if args.world_size > 1:
@@ -333,5 +333,5 @@ def setup_ddp_model(model, args, find_unused=False):
         return ddp_model
     else:
         # Single GPU - return model as-is
-        print(f"✓ Single GPU mode - skipping DDP wrapper")
+        print(f"Single GPU mode - skipping DDP wrapper")
         return model
