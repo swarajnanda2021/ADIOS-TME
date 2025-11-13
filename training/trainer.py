@@ -52,7 +52,7 @@ def train_adios_tme(args):
     
     # TME head
     tme_head = TMEHead(
-        in_dim=args.embed_dim, ,
+        in_dim=args.embed_dim,
         hidden_dim=2048,
         bottleneck_dim=256,
         use_bn=False
