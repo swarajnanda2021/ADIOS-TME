@@ -47,34 +47,49 @@ class ADIOSLoss(nn.Module):
     def contrastive_loss(self, original_emb, masked_embs, temperature):
         """
         Compute contrastive loss between original and masked embeddings.
+        Handles both full-size masks and crops properly.
+        
+        Args:
+            original_emb: Original image embeddings [B, D]
+            masked_embs: List of masked embeddings (includes full masks + crops)
+            temperature: Temperature for softmax
+        
+        Returns:
+            Contrastive loss value
         """
         batch_size = original_emb.shape[0]
-        num_masks = len(masked_embs)
+        num_masked_views = len(masked_embs)
         
         # Normalize embeddings
         original_emb = F.normalize(original_emb, p=2, dim=1)
         masked_embs = [F.normalize(emb, p=2, dim=1) for emb in masked_embs]
         
-        # Concatenate all embeddings
+        # Concatenate all embeddings: [original, masked_view1, masked_view2, ...]
+        # Note: masked_embs now contains BOTH full-size masks AND crops
         all_embeddings = torch.cat([original_emb] + masked_embs, dim=0)
+        
+        # Total size: batch_size * (1 + num_masked_views)
+        # where num_masked_views = num_masks + (num_masks * crops_per_mask)
+        total_size = all_embeddings.shape[0]
         
         # Compute similarity matrix
         sim_matrix = torch.matmul(all_embeddings, all_embeddings.T) / temperature
         
         # Create positive pair mask
-        batch_size = original_emb.shape[0]
-        positive_mask = torch.zeros(sim_matrix.shape, device=sim_matrix.device)
+        positive_mask = torch.zeros(total_size, total_size, device=sim_matrix.device)
         
-        # Original to each mask is positive
-        for m in range(num_masks):
+        # Original to each masked view is positive
+        for m in range(num_masked_views):
             for i in range(batch_size):
                 orig_idx = i
-                mask_idx = batch_size * (m + 1) + i
-                positive_mask[orig_idx, mask_idx] = 1.0
-                positive_mask[mask_idx, orig_idx] = 1.0
+                masked_view_idx = batch_size * (m + 1) + i
+\
+                
+                positive_mask[orig_idx, masked_view_idx] = 1.0
+                positive_mask[masked_view_idx, orig_idx] = 1.0
         
         # Remove self-similarities
-        self_mask = torch.eye(sim_matrix.shape[0], device=sim_matrix.device)
+        self_mask = torch.eye(total_size, device=sim_matrix.device)
         sim_matrix = sim_matrix * (1 - self_mask) - self_mask * 1e9
         
         # Compute loss

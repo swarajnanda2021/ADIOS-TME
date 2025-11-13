@@ -39,6 +39,8 @@ def get_args_parser():
     # ========== Mask Model ==========
     parser.add_argument('--num_masks', default=3, type=int,
                         help='Number of semantic masks to generate')
+    parser.add_argument('--crops_per_mask', default=2, type=int,
+                        help='Number of random crops per mask for multi-scale training (0 to disable)')
     parser.add_argument('--mask_encoder_dim', default=192, type=int,
                         help='Mask encoder embedding dimension')
     parser.add_argument('--mask_encoder_depth', default=12, type=int,
