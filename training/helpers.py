@@ -330,6 +330,7 @@ def setup_ddp_model(model, args, find_unused=False):
             find_unused_parameters=find_unused,
             broadcast_buffers=True
         )
+        ddp_model._set_static_graph()
         return ddp_model
     else:
         # Single GPU - return model as-is
