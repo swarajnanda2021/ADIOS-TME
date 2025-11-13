@@ -72,6 +72,9 @@ class ADIOSLoss(nn.Module):
         # where num_masked_views = num_masks + (num_masks * crops_per_mask)
         total_size = all_embeddings.shape[0]
         
+        # Debug info (remove after confirming fix)
+        print(f"[DEBUG] batch_size={batch_size}, num_masked_views={num_masked_views}, total_size={total_size}")
+        
         # Compute similarity matrix
         sim_matrix = torch.matmul(all_embeddings, all_embeddings.T) / temperature
         
@@ -83,7 +86,16 @@ class ADIOSLoss(nn.Module):
             for i in range(batch_size):
                 orig_idx = i
                 masked_view_idx = batch_size * (m + 1) + i
-\
+                
+                # Safety check
+                if masked_view_idx >= total_size:
+                    print(f"[ERROR] Index out of bounds!")
+                    print(f"  batch_size={batch_size}")
+                    print(f"  num_masked_views={num_masked_views}")
+                    print(f"  m={m}, i={i}")
+                    print(f"  masked_view_idx={masked_view_idx}")
+                    print(f"  total_size={total_size}")
+                    raise IndexError(f"Calculated index {masked_view_idx} >= total_size {total_size}")
                 
                 positive_mask[orig_idx, masked_view_idx] = 1.0
                 positive_mask[masked_view_idx, orig_idx] = 1.0
