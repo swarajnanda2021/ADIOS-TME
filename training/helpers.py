@@ -374,7 +374,7 @@ def rotate_tensor(tensor, angle):
 
 
 
-def apply_crops_to_masked_images_batched(original_image, cached_masks, K):
+def apply_crops_to_masked_images(original_image, cached_masks, K):
     """
     Apply crops while maintaining batch structure.
     
