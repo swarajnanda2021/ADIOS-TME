@@ -478,6 +478,7 @@ def apply_crops_to_masked_images(original_image, cached_masks, crop_params, K):
     return torch.cat(all_cropped_masked, dim=0)
 
 
+
 def process_student_with_cached_masks_and_crops(
     student, 
     cached_masks, 
@@ -496,7 +497,7 @@ def process_student_with_cached_masks_and_crops(
     2. Generates masked images
     3. Generates cropped variants
     4. Does ONE batched forward through student
-    5. Computes loss
+    5. Computes loss with proper multi-crop parameters
     
     Args:
         student: Student model
@@ -522,7 +523,7 @@ def process_student_with_cached_masks_and_crops(
         all_images.append(masked_img)
     
     # Generate and add cropped variants if K > 0
-    if K > 0:
+    if K > 0 and crop_params is not None:
         cropped_masked = apply_crops_to_masked_images(
             original_image, cached_masks, crop_params, K
         )
@@ -531,27 +532,29 @@ def process_student_with_cached_masks_and_crops(
         for i in range(cropped_masked.shape[0]):
             all_images.append(cropped_masked[i:i+1])
     
-    # ✅ SINGLE batched forward pass through student with ALL images
+    # SINGLE batched forward pass through student with ALL images
     all_embeddings = student(all_images)
     
     # Split the embeddings
     orig_emb = all_embeddings[0]
-    masked_embs = all_embeddings[1:num_masks+1]
+    masked_embs = all_embeddings[1:num_masks+1]  # Full-size masks
     
     if K > 0:
-        cropped_embs = all_embeddings[num_masks+1:]
+        cropped_embs = all_embeddings[num_masks+1:]  # Crops
         # Combine for loss computation
         all_masked_embeddings = masked_embs + cropped_embs
     else:
         all_masked_embeddings = masked_embs
     
-    # Compute loss
+    # Compute loss with proper parameters
     loss, metrics = adios_loss(
         orig_emb,
         all_masked_embeddings,
         masks=None,  # Don't need masks for student training
         iteration=current_iteration,
-        forward_type='student'
+        forward_type='student',
+        num_base_masks=num_masks,  
+        K=K 
     )
     
     return loss, metrics

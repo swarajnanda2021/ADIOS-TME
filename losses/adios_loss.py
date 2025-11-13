@@ -1,6 +1,11 @@
 """
-ADIOS Loss for TME training.
-Contrastive loss between original and masked embeddings with sparsity regularization.
+COMPLETE ADIOS Loss Implementation with Multi-Crop Support
+Replace your entire ADIOSLoss class in losses/adios_loss.py with this version.
+
+This properly handles:
+1. Distributed training with GatherLayer
+2. Multi-crop (full masks + crops)
+3. Proper indexing for multi-GPU
 """
 
 import math
@@ -10,9 +15,28 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 
+class GatherLayer(torch.autograd.Function):
+    """Gather tensors from all processes with gradient support."""
+    
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+        output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
+        dist.all_gather(output, input)
+        return tuple(output)
+
+    @staticmethod
+    def backward(ctx, *grads):
+        (input,) = ctx.saved_tensors
+        grad_out = torch.zeros_like(input)
+        grad_out[:] = grads[dist.get_rank()]
+        return grad_out
+
+
 class ADIOSLoss(nn.Module):
     """
     ADIOS loss with contrastive learning and sparsity regularization.
+    Supports multi-crop and distributed training.
     
     Args:
         alpha_sparsity: Weight for sparsity penalty
@@ -44,76 +68,129 @@ class ADIOSLoss(nn.Module):
         return self.final_temp + 0.5 * (self.initial_temp - self.final_temp) * \
             (1 + math.cos(math.pi * progress))
 
-    def contrastive_loss(self, original_emb, masked_embs, temperature):
+    def multi_mask_contrastive_loss_with_crops(
+        self, 
+        masked_embeddings, 
+        original_embeddings, 
+        temperature, 
+        num_base_masks=3, 
+        K=0
+    ):
         """
-        Compute contrastive loss between original and masked embeddings.
-        Handles both full-size masks and crops properly.
+        Modified contrastive loss that handles both full-size and cropped masks.
         
         Args:
-            original_emb: Original image embeddings [B, D]
-            masked_embs: List of masked embeddings (includes full masks + crops)
+            masked_embeddings: List of embeddings [mask1_full, ..., mask3_full, 
+                                                   mask1_crop1, ..., mask3_cropK]
+            original_embeddings: Original image embeddings [B, D]
             temperature: Temperature for softmax
-        
-        Returns:
-            Contrastive loss value
+            num_base_masks: Number of base masks (3 in your case)
+            K: Number of crops per mask (0 if no crops)
         """
-        batch_size = original_emb.shape[0]
-        num_masked_views = len(masked_embs)
+        device = original_embeddings.device
+        batch_size = original_embeddings.shape[0]
         
-        # Normalize embeddings
-        original_emb = F.normalize(original_emb, p=2, dim=1)
-        masked_embs = [F.normalize(emb, p=2, dim=1) for emb in masked_embs]
+        # Total masked embeddings = full masks + cropped masks
+        num_full_masks = num_base_masks
+        num_crop_masks = num_base_masks * K if K > 0 else 0
+        total_masked = num_full_masks + num_crop_masks
         
-        # Concatenate all embeddings: [original, masked_view1, masked_view2, ...]
-        # Note: masked_embs now contains BOTH full-size masks AND crops
-        all_embeddings = torch.cat([original_emb] + masked_embs, dim=0)
+        # Verify we have the right number of embeddings
+        expected_views = total_masked
+        actual_views = len(masked_embeddings)
+        if actual_views != expected_views:
+            print(f"WARNING: Expected {expected_views} masked views but got {actual_views}")
+            print(f"  num_base_masks={num_base_masks}, K={K}")
+            # Adjust to actual
+            total_masked = actual_views
         
-        # Total size: batch_size * (1 + num_masked_views)
-        # where num_masked_views = num_masks + (num_masks * crops_per_mask)
-        total_size = all_embeddings.shape[0]
+        # Normalize all embeddings
+        original_embeddings = F.normalize(original_embeddings, p=2, dim=1)
+        masked_embeddings = [F.normalize(emb, p=2, dim=1) for emb in masked_embeddings]
         
-        # Debug info (remove after confirming fix)
-        print(f"[DEBUG] batch_size={batch_size}, num_masked_views={num_masked_views}, total_size={total_size}")
+        # Concatenate: [original, full_masks, cropped_masks]
+        all_embeddings = torch.cat([original_embeddings] + masked_embeddings, dim=0)
+        
+        # Gather from all GPUs (critical for distributed training!)
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            all_embeddings_gathered = torch.cat(GatherLayer.apply(all_embeddings), dim=0)
+            world_size = dist.get_world_size()
+        else:
+            # Single GPU case
+            all_embeddings_gathered = all_embeddings
+            world_size = 1
+        
+        total_batch_size = batch_size * world_size
+        total_size = (1 + total_masked) * total_batch_size
+        
+        # Create positive mask matrix
+        positive_mask = torch.zeros(total_size, total_size, device=device)
+        
+        # For each GPU
+        for gpu in range(world_size):
+            # Calculate offset for this GPU's embeddings
+            gpu_offset = gpu * (1 + total_masked) * batch_size
+            
+            for i in range(batch_size):
+                # Original image index for this sample
+                orig_idx = gpu_offset + i
+                
+                # Full mask indices
+                for m in range(num_full_masks):
+                    mask_idx = gpu_offset + batch_size * (1 + m) + i
+                    if mask_idx < total_size:  # Safety check
+                        positive_mask[orig_idx, mask_idx] = 1.0
+                        positive_mask[mask_idx, orig_idx] = 1.0
+                
+                # Cropped mask indices
+                if K > 0:
+                    for m in range(num_base_masks):
+                        for k in range(K):
+                            crop_idx = gpu_offset + batch_size * (1 + num_full_masks + m * K + k) + i
+                            if crop_idx < total_size:  # Safety check
+                                positive_mask[orig_idx, crop_idx] = 1.0
+                                positive_mask[crop_idx, orig_idx] = 1.0
+                    
+                    # Optional: Add connections between full mask and its crops
+                    for m in range(num_base_masks):
+                        full_mask_idx = gpu_offset + batch_size * (1 + m) + i
+                        for k in range(K):
+                            crop_idx = gpu_offset + batch_size * (1 + num_full_masks + m * K + k) + i
+                            if crop_idx < total_size and full_mask_idx < total_size:
+                                positive_mask[full_mask_idx, crop_idx] = 1.0
+                                positive_mask[crop_idx, full_mask_idx] = 1.0
         
         # Compute similarity matrix
-        sim_matrix = torch.matmul(all_embeddings, all_embeddings.T) / temperature
+        sim_matrix = torch.matmul(all_embeddings_gathered, all_embeddings_gathered.T) / temperature
         
-        # Create positive pair mask
-        positive_mask = torch.zeros(total_size, total_size, device=sim_matrix.device)
+        # Numerical stability
+        sim_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
+        sim_matrix = sim_matrix - sim_max.detach()
         
-        # Original to each masked view is positive
-        for m in range(num_masked_views):
-            for i in range(batch_size):
-                orig_idx = i
-                masked_view_idx = batch_size * (m + 1) + i
-                
-                # Safety check
-                if masked_view_idx >= total_size:
-                    print(f"[ERROR] Index out of bounds!")
-                    print(f"  batch_size={batch_size}")
-                    print(f"  num_masked_views={num_masked_views}")
-                    print(f"  m={m}, i={i}")
-                    print(f"  masked_view_idx={masked_view_idx}")
-                    print(f"  total_size={total_size}")
-                    raise IndexError(f"Calculated index {masked_view_idx} >= total_size {total_size}")
-                
-                positive_mask[orig_idx, masked_view_idx] = 1.0
-                positive_mask[masked_view_idx, orig_idx] = 1.0
-        
-        # Remove self-similarities
-        self_mask = torch.eye(total_size, device=sim_matrix.device)
-        sim_matrix = sim_matrix * (1 - self_mask) - self_mask * 1e9
-        
-        # Compute loss
+        # Compute exp similarities
         exp_sim = torch.exp(sim_matrix)
-        denominator = exp_sim.sum(dim=1, keepdim=True) - torch.exp(torch.diag(sim_matrix)).unsqueeze(1)
+        self_mask = torch.eye(total_size, device=device)
+        exp_sim = exp_sim * (1 - self_mask)
         
-        loss = -torch.log(
-            (positive_mask * exp_sim).sum(dim=1) / (denominator + 1e-8)
-        )
+        # Compute log probabilities
+        denominator = exp_sim.sum(dim=1, keepdim=True)
+        log_prob = sim_matrix - torch.log(denominator + 1e-7)
         
-        # Only compute loss for original embeddings
-        return loss[:batch_size].mean()
+        # Compute loss with positive pairs
+        positive_pairs_per_row = positive_mask.sum(dim=1)
+        mean_log_prob = (positive_mask * log_prob).sum(dim=1) / positive_pairs_per_row.clamp(min=1e-7)
+        
+        # Extract loss only for original embeddings
+        original_indices = []
+        for gpu in range(world_size):
+            gpu_offset = gpu * (1 + total_masked) * batch_size
+            for i in range(batch_size):
+                original_indices.append(gpu_offset + i)
+        
+        original_indices = torch.tensor(original_indices, device=device)
+        original_rows = mean_log_prob[original_indices]
+        
+        return -original_rows.mean()
 
     def sparsity_penalty(self, masks):
         """
@@ -129,28 +206,45 @@ class ADIOSLoss(nn.Module):
         return penalty / masks.shape[1]
 
     def forward(self, original_emb, masked_embs, masks=None, iteration=0, 
-                forward_type='student'):
+                forward_type='student', num_base_masks=3, K=0):
         """
+        Forward pass with support for multi-crop.
+        
         Args:
-            forward_type: 'student' or 'mask' to control behavior
+            original_emb: Original embeddings [B, D]
+            masked_embs: List of masked embeddings (full + crops)
+            masks: Mask tensors (only needed for 'mask' forward type)
+            iteration: Current iteration (for temperature schedule)
+            forward_type: 'student' or 'mask'
+            num_base_masks: Number of base masks (default: 3)
+            K: Number of crops per mask (default: 0)
+        
+        Returns:
+            loss: Total loss value
+            metrics: Dictionary of metrics
         """
         temperature = self.get_temperature(iteration)
         
-        # Contrastive loss
-        contrastive = self.contrastive_loss(original_emb, masked_embs, temperature)
+        # Use multi-crop aware loss
+        contrastive = self.multi_mask_contrastive_loss_with_crops(
+            masked_embs, 
+            original_emb, 
+            temperature,
+            num_base_masks=num_base_masks,
+            K=K
+        )
         
         metrics = {
-            'contrastive': contrastive.item(),
+            'similarity': contrastive.item(),
             'temperature': temperature
         }
         
-        if forward_type == 'student':
-            # Student: minimize contrastive loss (wants similarity)
-            total_loss = contrastive
-            
-        elif forward_type == 'mask':
-            # Mask: MAXIMIZE contrastive loss (adversarial)
+        total_loss = contrastive
+        
+        # Add sparsity penalty only for mask model training
+        if forward_type == 'mask' and masks is not None:
             sparsity = self.sparsity_penalty(masks)
+            # Mask model: maximize contrastive loss (adversarial) + sparsity
             total_loss = -contrastive + self.alpha_sparsity * sparsity
             metrics['sparsity'] = sparsity.item()
             metrics['adversarial_loss'] = (-contrastive).item()

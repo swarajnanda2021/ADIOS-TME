@@ -325,7 +325,7 @@ def train_adios_tme(args):
 
             metric_logger.update(recon_loss=recon_loss.item())
             
-            # Phase 3: Update Mask Model
+            # ============ Phase 3: Update Mask Model ============
             student.eval()
             mask_model.train()
             reconstructor.eval()
@@ -349,12 +349,15 @@ def train_adios_tme(args):
                 masked_embs = all_embeddings[1:]
                 
                 # Compute adversarial loss (mask tries to maximize contrastive loss)
+                # NOTE: K=0 for mask model training (no crops in adversarial phase)
                 mask_loss, mask_metrics = adios_loss(
                     original_emb,
                     masked_embs,
                     masks=fresh_masks,
                     iteration=iteration,
-                    forward_type='mask'  # Adversarial mode
+                    forward_type='mask',
+                    num_base_masks=args.num_masks,  # ✅ Pass this
+                    K=0  # ✅ No crops for mask model training
                 )
                 
                 # Add reconstruction reward
@@ -365,11 +368,11 @@ def train_adios_tme(args):
                     if fresh_masks.shape[1] > 1:
                         guidance_mask_g = fresh_masks[:, 1:2, :, :]
                         hybrid_test[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
-                                                     guidance_mask_g * (1 - content_mask))
+                                                    guidance_mask_g * (1 - content_mask))
                     if fresh_masks.shape[1] > 2:
                         guidance_mask_b = fresh_masks[:, 2:3, :, :]
                         hybrid_test[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
-                                                     guidance_mask_b * (1 - content_mask))
+                                                    guidance_mask_b * (1 - content_mask))
                     
                     reconstructed_test = reconstructor(hybrid_test)
                     recon_error = F.l1_loss(reconstructed_test, original_image)
