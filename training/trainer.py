@@ -278,7 +278,7 @@ def train_adios_tme(args):
             # OR: reconstruction_reward = 1.0 / (1.0 + recon_error)  
             
             # Combine: Adversarial loss MINUS reconstruction reward
-            total_mask_loss = mask_loss - * reconstruction_reward
+            total_mask_loss = mask_loss - reconstruction_reward
             
             total_mask_loss.backward()
             if args.clip_grad:
