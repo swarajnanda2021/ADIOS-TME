@@ -98,6 +98,10 @@ def get_args_parser():
                         help='Visualize masks every N iterations')
     
     # ========== Distributed ==========
+    parser.add_argument('--world_size', default=1, type=int,
+                        help='Number of distributed processes')
+    parser.add_argument('--rank', default=0, type=int,
+                        help='Global rank of the process')
     parser.add_argument('--seed', default=42, type=int,
                         help='Random seed')
     parser.add_argument('--dist_url', default='env://', type=str,

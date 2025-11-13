@@ -739,6 +739,10 @@ def init_distributed_mode(args):
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
         args.gpu = args.rank % torch.cuda.device_count()
+        if 'SLURM_NTASKS' in os.environ:
+            args.world_size = int(os.environ['SLURM_NTASKS'])
+        else:
+            args.world_size = 1
     # launched naively with `python main_dino.py`
     # we manually add MASTER_ADDR and MASTER_PORT to env variables
     elif torch.cuda.is_available():
