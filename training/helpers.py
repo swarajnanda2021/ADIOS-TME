@@ -507,7 +507,7 @@ def process_student_with_cached_masks_and_crops(
     
     # Generate and add cropped variants if K > 0
     if K > 0:
-        crop_variants = apply_crops_to_masked_images_batched(
+        crop_variants = apply_crops_to_masked_images(
             original_image, cached_masks, K
         )
         # crop_variants is a list of num_masks * K tensors, each [B, C, H, W]
