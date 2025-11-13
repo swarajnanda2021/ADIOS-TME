@@ -342,48 +342,6 @@ def setup_ddp_model(model, args, find_unused=False):
 
 
 
-
-
-def generate_crop_parameters(batch_size, num_masks, K, img_size=224):
-    """
-    Pre-generate all crop/rotation parameters to avoid redundant computation.
-    
-    Args:
-        batch_size: Batch size
-        num_masks: Number of masks (e.g., 3)
-        K: Number of crops per mask (e.g., 2-3)
-        img_size: Image size (default: 224)
-    
-    Returns:
-        List of dicts containing crop parameters
-    """
-    params = []
-    for b in range(batch_size):
-        for m in range(num_masks):
-            for k in range(K):
-                # Random scale between 40% and 100%
-                scale = np.random.uniform(0.4, 1.0)
-                
-                # Calculate crop size
-                crop_size = int(img_size * scale)
-                
-                # Random position
-                max_pos = img_size - crop_size
-                top = np.random.randint(0, max_pos + 1) if max_pos > 0 else 0
-                left = np.random.randint(0, max_pos + 1) if max_pos > 0 else 0
-                
-                # Random rotation (-180 to 180 degrees)
-                angle = np.random.uniform(-180, 180)
-                
-                params.append({
-                    'crop_box': (top, left, top + crop_size, left + crop_size),
-                    'angle': angle,
-                    'scale': scale
-                })
-    
-    return params
-
-
 def rotate_tensor(tensor, angle):
     """
     Rotate tensor by given angle in degrees.
@@ -414,88 +372,113 @@ def rotate_tensor(tensor, angle):
     return rotated
 
 
-def apply_crops_to_masked_images(original_image, cached_masks, crop_params, K):
+
+
+def apply_crops_to_masked_images_batched(original_image, cached_masks, K):
     """
-    Apply crops efficiently in batches to manage memory.
+    Apply crops while maintaining batch structure.
+    
+    CRITICAL: Returns K crop variants per mask, each with shape [B, C, H, W].
     
     Args:
         original_image: Original images [B, C, H, W]
         cached_masks: Pre-computed masks [B, num_masks, H, W]
-        crop_params: List of crop parameters from generate_crop_parameters
         K: Number of crops per mask
     
     Returns:
-        Tensor of all cropped masked images [B*num_masks*K, C, 224, 224]
+        List of [B, C, H, W] tensors, one per (mask, crop_position) combination
+        Length: num_masks * K
     """
     B, C, H, W = original_image.shape
     num_masks = cached_masks.shape[1]
     
-    # Process in chunks to manage memory
-    chunk_size = 8  # Process 8 crops at a time
-    all_cropped_masked = []
+    all_crop_variants = []
     
-    total_crops = B * num_masks * K
-    
-    for chunk_start in range(0, total_crops, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, total_crops)
-        chunk_images = []
+    # For each mask
+    for m in range(num_masks):
+        mask = cached_masks[:, m:m+1, :, :]  # [B, 1, H, W]
         
-        for idx in range(chunk_start, chunk_end):
-            # Decode indices
-            b = idx // (num_masks * K)
-            m = (idx // K) % num_masks
-            k = idx % K
+        # Create masked image for this mask
+        masked_img = original_image * (1 - mask)  # [B, C, H, W]
+        
+        # For each crop position
+        for k in range(K):
+            # Generate crop parameters for entire batch (same params for all samples)
+            scale = np.random.uniform(0.4, 1.0)
+            crop_size = int(224 * scale)
             
-            # Get parameters
-            param_idx = b * num_masks * K + m * K + k
-            params = crop_params[param_idx]
+            # Random position
+            max_pos = 224 - crop_size
+            top = np.random.randint(0, max_pos + 1) if max_pos > 0 else 0
+            left = np.random.randint(0, max_pos + 1) if max_pos > 0 else 0
             
-            # Extract crop from both image and mask
-            img_crop = original_image[b:b+1, :,
-                                    params['crop_box'][0]:params['crop_box'][2],
-                                    params['crop_box'][1]:params['crop_box'][3]]
-            mask_crop = cached_masks[b:b+1, m:m+1,
-                                   params['crop_box'][0]:params['crop_box'][2],
-                                   params['crop_box'][1]:params['crop_box'][3]]
+            # Random rotation
+            angle = np.random.uniform(-180, 180)
             
-            # Apply mask to crop (mask out regions)
-            masked_crop = img_crop * (1 - mask_crop)
+            # Apply crop to entire batch
+            cropped = masked_img[:, :, top:top+crop_size, left:left+crop_size]
             
             # Resize to 224x224
-            masked_resized = F.interpolate(masked_crop, size=(224, 224),
-                                         mode='bilinear', align_corners=False)
+            cropped_resized = F.interpolate(cropped, size=(224, 224),
+                                           mode='bilinear', align_corners=False)
             
-            # Apply rotation
-            masked_rotated = rotate_tensor(masked_resized, params['angle'])
+            # Apply rotation to entire batch
+            cropped_rotated = rotate_tensor_batch(cropped_resized, angle)
             
-            chunk_images.append(masked_rotated)
-        
-        # Concatenate chunk
-        if chunk_images:
-            chunk_tensor = torch.cat(chunk_images, dim=0)
-            all_cropped_masked.append(chunk_tensor)
+            all_crop_variants.append(cropped_rotated)  # [B, C, 224, 224]
     
-    return torch.cat(all_cropped_masked, dim=0)
+    return all_crop_variants
 
+
+def rotate_tensor_batch(tensor, angle):
+    """
+    Rotate entire batch by given angle in degrees.
+    
+    Args:
+        tensor: Input tensor [B, C, H, W]
+        angle: Rotation angle in degrees (same for entire batch)
+    
+    Returns:
+        Rotated tensor [B, C, H, W]
+    """
+    B = tensor.shape[0]
+    
+    # Convert angle to radians
+    angle_rad = angle * np.pi / 180
+    
+    # Create rotation matrix
+    cos_val = np.cos(angle_rad)
+    sin_val = np.sin(angle_rad)
+    
+    # Use grid_sample for rotation (same rotation for entire batch)
+    theta = torch.tensor([
+        [cos_val, -sin_val, 0],
+        [sin_val, cos_val, 0]
+    ], dtype=tensor.dtype, device=tensor.device).unsqueeze(0).repeat(B, 1, 1)
+    
+    grid = F.affine_grid(theta, tensor.size(), align_corners=False)
+    rotated = F.grid_sample(tensor, grid, align_corners=False, padding_mode='zeros')
+    
+    return rotated
 
 
 def process_student_with_cached_masks_and_crops(
     student, 
     cached_masks, 
     original_image, 
-    crop_params, 
+    crop_params,  # Not used in batched version
     K, 
     current_iteration,
     adios_loss, 
     num_masks=3
 ):
     """
-    Efficient student forward with cached masks and multi-crop.
+    Efficient student forward with cached masks and multi-crop (BATCHED VERSION).
     
     This function:
     1. Uses pre-computed masks (no mask model forward)
-    2. Generates masked images
-    3. Generates cropped variants
+    2. Generates masked images (batched)
+    3. Generates cropped variants (batched) 
     4. Does ONE batched forward through student
     5. Computes loss with proper multi-crop parameters
     
@@ -503,7 +486,7 @@ def process_student_with_cached_masks_and_crops(
         student: Student model
         cached_masks: Pre-computed masks [B, num_masks, H, W]
         original_image: Original images [B, C, H, W]
-        crop_params: Pre-generated crop parameters
+        crop_params: Not used (kept for API compatibility)
         K: Number of crops per mask
         current_iteration: Current training iteration
         adios_loss: Loss function
@@ -513,48 +496,62 @@ def process_student_with_cached_masks_and_crops(
         loss: Computed loss
         metrics: Loss metrics
     """
-    # Create all images to process
-    all_images = [original_image]  # Start with original
+    # Create all images to process (all maintaining batch structure)
+    all_images = [original_image]  # [B, C, H, W]
     
-    # Add full-size masked images
+    # Add full-size masked images (each maintains batch structure)
     for i in range(num_masks):
-        mask = cached_masks[:, i:i+1, :, :]
-        masked_img = original_image * (1 - mask)
+        mask = cached_masks[:, i:i+1, :, :]  # [B, 1, H, W]
+        masked_img = original_image * (1 - mask)  # [B, C, H, W]
         all_images.append(masked_img)
     
     # Generate and add cropped variants if K > 0
-    if K > 0 and crop_params is not None:
-        cropped_masked = apply_crops_to_masked_images(
-            original_image, cached_masks, crop_params, K
+    if K > 0:
+        crop_variants = apply_crops_to_masked_images_batched(
+            original_image, cached_masks, K
         )
-        
-        # Split crops into list and add to all_images
-        for i in range(cropped_masked.shape[0]):
-            all_images.append(cropped_masked[i:i+1])
+        # crop_variants is a list of num_masks * K tensors, each [B, C, H, W]
+        all_images.extend(crop_variants)
     
-    # SINGLE batched forward pass through student with ALL images
+    # Debug: Check we have the right number
+    expected_views = 1 + num_masks + (num_masks * K)
+    actual_views = len(all_images)
+    if actual_views != expected_views:
+        print(f"[ERROR] Expected {expected_views} views but got {actual_views}")
+        print(f"  original: 1, full_masks: {num_masks}, crops: {num_masks * K}")
+    
+    # ✅ SINGLE batched forward pass through student with ALL images
+    # all_images is a list of tensors, each [B, C, H, W]
     all_embeddings = student(all_images)
+    # all_embeddings is a list of tensors, each [B, D]
     
     # Split the embeddings
-    orig_emb = all_embeddings[0]
-    masked_embs = all_embeddings[1:num_masks+1]  # Full-size masks
+    orig_emb = all_embeddings[0]  # [B, D]
+    masked_embs = all_embeddings[1:num_masks+1]  # List of num_masks tensors, each [B, D]
     
     if K > 0:
-        cropped_embs = all_embeddings[num_masks+1:]  # Crops
+        cropped_embs = all_embeddings[num_masks+1:]  # List of (num_masks*K) tensors, each [B, D]
         # Combine for loss computation
         all_masked_embeddings = masked_embs + cropped_embs
     else:
         all_masked_embeddings = masked_embs
     
+    # Verify all embeddings have same batch size
+    batch_size = orig_emb.shape[0]
+    for i, emb in enumerate(all_masked_embeddings):
+        if emb.shape[0] != batch_size:
+            print(f"[ERROR] Embedding {i} has batch size {emb.shape[0]}, expected {batch_size}")
+    
     # Compute loss with proper parameters
     loss, metrics = adios_loss(
         orig_emb,
         all_masked_embeddings,
-        masks=None,  # Don't need masks for student training
+        masks=None,
         iteration=current_iteration,
         forward_type='student',
-        num_base_masks=num_masks,  
-        K=K 
+        num_base_masks=num_masks,
+        K=K
     )
     
     return loss, metrics
+
