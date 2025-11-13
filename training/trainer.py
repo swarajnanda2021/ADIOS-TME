@@ -12,10 +12,13 @@ from pathlib import Path
 import json
 
 import utils
-from models import TMEModel, ModernViT, TMEHead, MaskModel
-from models.vision_transformer.auxiliary_models import ReconstructorModel
+from models.tme_model import TMEModel
+from models.vision_transformer.modern_vit import VisionTransformer
+from models.vision_transformer.auxiliary_models import TMEHead, MaskModel, ReconstructorModel
+from data.datasets import ADIOSPathologyDataset
 from losses.adios_loss import ADIOSLoss
-from data import DINOv2PathologyDataset
+
+
 from .helpers import (
     save_iteration_masks_efficient,
     worker_init_fn,
@@ -35,7 +38,7 @@ def train_adios_tme(args):
     # ============ Create models ============
     
     # Student encoder
-    student_backbone = ModernViT(
+    student_backbone = VisionTransformer(
         img_size=224,
         patch_size=args.patch_size,
         embed_dim=args.embeddingdim,
@@ -137,16 +140,11 @@ def train_adios_tme(args):
     )
     
     # ============ Create dataset ============
-    dataset = DINOv2PathologyDataset(
-        base_dir=args.base_dir,
+    dataset = ADIOSPathologyDataset(
+        data_path=args.data_path,
         index_file="dataset_index.pkl",
-        n_standard_local_crops=0,
-        global_views=2,
-        worker_id=0,
-        num_workers=args.num_workers,
-        rank=args.gpu,
-        world_size=dist.get_world_size(),
-        seed=args.seed,
+        img_size=args.img_size,
+        max_samples=None,
     )
     
     data_loader = torch.utils.data.DataLoader(
@@ -168,7 +166,7 @@ def train_adios_tme(args):
             break
             
         # Get original image (last in the batch)
-        original_image = data[-1].cuda(non_blocking=True)
+        original_image = data.cuda(non_blocking=True)
         
         # ========== Phase 1: Generate masks ==========
         with torch.no_grad():
@@ -267,7 +265,7 @@ def train_adios_tme(args):
             print(f"Iteration {iteration}: {metric_logger}")
         
         # ========== Checkpoint ==========
-        if iteration % args.save_checkpoint_freq == 0:
+        if iteration % args.save_freq == 0:
             save_dict = {
                 'student': student.state_dict(),
                 'mask_model': mask_model.state_dict(),

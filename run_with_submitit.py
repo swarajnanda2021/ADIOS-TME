@@ -11,8 +11,8 @@ import uuid
 from pathlib import Path
 import submitit
 
-from configs.adios_config import get_args_parser
-from training.adios_trainer import train_adios_tme
+from configs.config import get_args_parser
+from training.trainer import train_adios_tme
 
 
 def get_shared_folder() -> Path:
