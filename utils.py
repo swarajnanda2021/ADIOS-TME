@@ -730,43 +730,50 @@ def setup_for_distributed(is_master):
 
 
 def init_distributed_mode(args):
-    # launched with torch.distributed.launch
+    # Check if we're in a distributed environment
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        # launched with torch.distributed.launch
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
         args.gpu = int(os.environ['LOCAL_RANK'])
-    # launched with submitit on a slurm cluster
     elif 'SLURM_PROCID' in os.environ:
+        # launched with submitit on a slurm cluster
         args.rank = int(os.environ['SLURM_PROCID'])
         args.gpu = args.rank % torch.cuda.device_count()
         if 'SLURM_NTASKS' in os.environ:
             args.world_size = int(os.environ['SLURM_NTASKS'])
         else:
             args.world_size = 1
-    # launched naively with `python main_dino.py`
-    # we manually add MASTER_ADDR and MASTER_PORT to env variables
     elif torch.cuda.is_available():
+        # Single GPU training
         print('Will run the code on one GPU.')
-        args.rank, args.gpu, args.world_size = 0, 0, 1
+        args.rank = 0
+        args.gpu = 0
+        args.world_size = 1
         os.environ['MASTER_ADDR'] = '127.0.0.1'
         os.environ['MASTER_PORT'] = '29500'
     else:
         print('Does not support training without GPU.')
         sys.exit(1)
 
-    dist.init_process_group(
-        backend="nccl",
-        init_method=args.dist_url,
-        world_size=args.world_size,
-        rank=args.rank,
-    )
-
-    torch.cuda.set_device(args.gpu)
-    print('| distributed init (rank {}): {}'.format(
-        args.rank, args.dist_url), flush=True)
-    dist.barrier()
-    setup_for_distributed(args.rank == 0)
-
+    # Only initialize process group if world_size > 1
+    if args.world_size > 1:
+        dist.init_process_group(
+            backend="nccl",
+            init_method=args.dist_url,
+            world_size=args.world_size,
+            rank=args.rank,
+        )
+        torch.cuda.set_device(args.gpu)
+        print('| distributed init (rank {}): {}'.format(
+            args.rank, args.dist_url), flush=True)
+        dist.barrier()
+        setup_for_distributed(args.rank == 0)
+    else:
+        # Single GPU - no distributed setup needed
+        torch.cuda.set_device(args.gpu)
+        print(f'| Single GPU mode - using GPU {args.gpu}')
+        setup_for_distributed(True)  # Always print in single GPU mode
 
 
 
