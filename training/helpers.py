@@ -314,7 +314,7 @@ def setup_ddp_model(model, args, find_unused=False):
         find_unused: Whether to find unused parameters
         
     Returns:
-        DDP-wrapped model
+        DDP-wrapped model (or original model if single GPU)
     """
     # Enable gradient checkpointing BEFORE DDP wrapping
     if hasattr(args, 'grad_checkpointing') and args.grad_checkpointing:
@@ -322,11 +322,16 @@ def setup_ddp_model(model, args, find_unused=False):
             model.set_grad_checkpointing(True)
             print(f"✓ Enabled gradient checkpointing before DDP wrapping")
 
-    ddp_model = nn.parallel.DistributedDataParallel(
-        model,
-        device_ids=[args.gpu],
-        find_unused_parameters=find_unused,
-        broadcast_buffers=True
-    )
-    
-    return ddp_model
+    # Only wrap with DDP if using multiple GPUs
+    if args.world_size > 1:
+        ddp_model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.gpu],
+            find_unused_parameters=find_unused,
+            broadcast_buffers=True
+        )
+        return ddp_model
+    else:
+        # Single GPU - return model as-is
+        print(f"✓ Single GPU mode - skipping DDP wrapper")
+        return model
