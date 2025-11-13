@@ -1,4 +1,3 @@
-from training.adios_trainer import train_adios_tme
 import argparse
 import multiprocessing as mp
 from pathlib import Path
