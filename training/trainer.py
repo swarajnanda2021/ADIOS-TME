@@ -64,8 +64,8 @@ def train_adios_tme(args):
         tme_head=tme_head
     )
     
-    # Mask model (smaller encoder)
-    mask_encoder = ModernViT(
+    # Mask model (ViT-Tiny)
+    mask_encoder = VisionTransformer(
         img_size=224,
         patch_size=16,
         embed_dim=192,
@@ -83,8 +83,8 @@ def train_adios_tme(args):
         drop_rate=0.2
     )
     
-    # Reconstructor
-    reconstructor_encoder = ModernViT(
+    # Reconstructor (ViT-Tiny)
+    reconstructor_encoder = VisionTransformer(
         img_size=224,
         patch_size=16,
         embed_dim=192,
