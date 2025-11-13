@@ -31,8 +31,6 @@ from .helpers import (
     save_iteration_masks_efficient,
     worker_init_fn,
     setup_ddp_model,
-    # Add the new functions:
-    generate_crop_parameters,
     apply_crops_to_masked_images,
     process_student_with_cached_masks_and_crops,
 )
@@ -234,16 +232,7 @@ def train_adios_tme(args):
             cached_mask_output = mask_model(original_image)
             cached_masks = cached_mask_output["masks"].clone()  # Clone to ensure no graph retention
             
-            # Generate crop parameters ONCE and cache them too
-            if crops_per_mask > 0:
-                crop_params = generate_crop_parameters(
-                    batch_size=batch_size,
-                    num_masks=args.num_masks,
-                    K=crops_per_mask,
-                    img_size=224
-                )
-            else:
-                crop_params = None
+            crop_params = None
         
         # Clean up the original output to free memory
         del cached_mask_output
