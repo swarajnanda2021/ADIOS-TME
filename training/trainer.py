@@ -18,6 +18,7 @@ from models.vision_transformer.auxiliary_models import TMEHead, MaskModel, Recon
 from data.datasets import ADIOSPathologyDataset
 from losses.adios_loss import ADIOSLoss
 
+from visualizations import safe_visualization_wrapper
 
 from .helpers import (
     save_iteration_masks_efficient,
@@ -281,6 +282,44 @@ def train_adios_tme(args):
             metric_logger.update(mask_loss=mask_loss.item())
             metric_logger.update(recon_loss=recon_loss.item())
             metric_logger.update(recon_reward=reconstruction_reward.item())
+        
+        # ========== Visualization ==========
+        if iteration % args.viz_freq == 0 and iteration < 5000 and args.num_masks > 0:
+            sample_image = original_image[:1]
+            with torch.no_grad():
+                vis_masks = mask_model(sample_image)['masks']
+                
+                # Generate reconstruction if reconstructor exists
+                reconstructed_images = None
+                if reconstructor is not None:
+                    # Create hybrid input for reconstructor
+                    content_mask = vis_masks[:, 0:1, :, :]
+                    if vis_masks.shape[1] >= 2:
+                        guidance_mask_g = vis_masks[:, 1:2, :, :]
+                    else:
+                        guidance_mask_g = torch.zeros_like(content_mask)
+                    if vis_masks.shape[1] >= 3:
+                        guidance_mask_b = vis_masks[:, 2:3, :, :]
+                    else:
+                        guidance_mask_b = torch.zeros_like(content_mask)
+                    
+                    hybrid_input = torch.zeros_like(sample_image)
+                    hybrid_input[:, 0:1, :, :] = sample_image[:, 0:1, :, :] * content_mask
+                    hybrid_input[:, 1:2, :, :] = (sample_image[:, 1:2, :, :] * content_mask +
+                                                guidance_mask_g * (1 - content_mask))
+                    hybrid_input[:, 2:3, :, :] = (sample_image[:, 2:3, :, :] * content_mask +
+                                                guidance_mask_b * (1 - content_mask))
+                    
+                    reconstructed_images = reconstructor(hybrid_input)
+                
+                # Save visualization
+                safe_visualization_wrapper(
+                    sample_image,
+                    vis_masks,
+                    iteration,
+                    os.path.join(args.output_dir, 'visualizations', 'masks'),
+                    reconstructed_images
+                )
         
         # ========== Logging ==========
         metric_logger.update(student_loss=student_loss.item())

@@ -95,7 +95,7 @@ def get_args_parser():
     parser.add_argument('--log_freq', default=10, type=int,
                         help='Log metrics every N iterations')
     parser.add_argument('--viz_freq', default=500, type=int,
-                        help='Visualize masks every N iterations')
+                    help='Visualize masks every N iterations')
     
     # ========== Distributed ==========
     parser.add_argument('--world_size', default=1, type=int,
