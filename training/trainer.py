@@ -154,22 +154,10 @@ def train_adios_tme(args):
         max_samples=None,
     )
 
-    if args.world_size > 1:
-        sampler = torch.utils.data.DistributedSampler(
-            dataset,
-            num_replicas=dist.get_world_size(),
-            rank=args.rank,
-            shuffle=True
-        )
-    else:
-        sampler = None
-    
     data_loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
-        shuffle=(sampler is None),
-        sampler=sampler, 
         drop_last=True,
         pin_memory=True,
         persistent_workers=True,
