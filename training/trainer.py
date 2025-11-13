@@ -268,7 +268,7 @@ def train_adios_tme(args):
             
             # 2. RECONSTRUCTION OBJECTIVE: Ensure semantic meaningfulness
             with torch.no_grad():
-                # Create hybrid input for reconstructor
+                # Create hybrid input for reconstructor (using one channel for information and others for reconstruction target)
                 hybrid_test = create_hybrid_input(original_image, masks_fresh)
                 reconstructed_test = reconstructor(hybrid_test)
                 recon_error = F.l1_loss(reconstructed_test, original_image)
