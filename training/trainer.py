@@ -41,9 +41,9 @@ def train_adios_tme(args):
     student_backbone = VisionTransformer(
         img_size=224,
         patch_size=args.patch_size,
-        embed_dim=args.embeddingdim,
-        depth=args.vitdepth,
-        num_heads=args.vitheads,
+        embed_dim=args.embed_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
         mlp_ratio=4.0,
         qkv_bias=True,
         drop_path_rate=0.4,
