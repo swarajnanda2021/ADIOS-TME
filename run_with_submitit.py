@@ -28,7 +28,7 @@ def parse_args():
                         help="Number of nodes")
     parser.add_argument("--timeout", default=10000, type=int, 
                         help="Job duration in minutes")
-    parser.add_argument("--partition", default="gpu", type=str, 
+    parser.add_argument("--partition", default="vanderbc_gpu", type=str, 
                         help="Partition name")
     parser.add_argument("--constraint", default="h100", type=str,
                         help="GPU constraint (a100, h100, etc)")
@@ -40,7 +40,7 @@ def get_shared_folder() -> Path:
     """Get shared folder for logs and checkpoints."""
     user = os.environ.get('USER', 'user')
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    p = Path(f"/data1/vanderbc/{user}/adios_tme_runs/run_{timestamp}")
+    p = Path(f"/data1/vanderbc/nandas1/STEGO-TME/logs")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
