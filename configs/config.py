@@ -50,15 +50,19 @@ def get_args_parser():
     parser.add_argument('--mask_dropout', default=0.2, type=float,
                         help='Dropout rate in mask decoder')
     
-    # ========== ADIOS Loss ==========
-    parser.add_argument('--alpha_sparsity', default=0.1, type=float,
-                        help='Weight for sparsity penalty on masks')
-    parser.add_argument('--initial_temp', default=0.2, type=float,
-                        help='Initial temperature for contrastive loss')
-    parser.add_argument('--final_temp', default=0.05, type=float,
-                        help='Final temperature for contrastive loss')
-    parser.add_argument('--reconstruction_weight', default=0.1, type=float,
-                        help='Weight for reconstruction reward')
+    # In your main script or config
+    parser.add_argument('--checkpoint_path', type=str, required=True,
+                        help='Path to pretrained ViT checkpoint')
+    parser.add_argument('--template_path', type=str, required=True,
+                        help='Path to template feature bank pickle')
+    parser.add_argument('--temperature', type=float, default=0.07,
+                        help='Temperature for contrastive loss')
+    parser.add_argument('--top_k_patches', type=int, default=20,
+                        help='Number of patches to select per mask')
+    parser.add_argument('--diversity_weight', type=float, default=0.1,
+                        help='Weight for diversity loss')
+    parser.add_argument('--sparsity_weight', type=float, default=0.1,
+                        help='Weight for sparsity loss')
     
     # ========== Training ==========
     parser.add_argument('--batch_size_per_gpu', default=64, type=int,

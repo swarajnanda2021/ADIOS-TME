@@ -1,55 +1,70 @@
 """
-ADIOS-TME training loop 
+Semantic grounding trainer via feature correspondence.
 
-Key optimizations:
-1. Proper fp16/bfloat16 with gradient scaler
-2. Mask caching (compute once per iteration)
-3. Multi-crop implementation
-4. Batched forward passes
-5. Memory-efficient crop processing
+Architecture:
+    - Frozen ViT backbone for feature extraction
+    - MaskModel (frozen encoder + trainable decoder)
+    - Template feature bank (nuclei + background)
+
+Training:
+    - Extract features from unmasked images
+    - Generate masks
+    - Select patches by mask values
+    - Align selected features with templates
 """
 
 import os
-import time
+import pickle
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from pathlib import Path
-import json
 
 import utils
-from models.tme_model import TMEModel
 from models.vision_transformer.modern_vit import VisionTransformer
-from models.vision_transformer.auxiliary_models import TMEHead, MaskModel_SpectralNorm, ReconstructorModel
+from models.vision_transformer.auxiliary_models import MaskModel
 from data.datasets import ADIOSPathologyDataset
-from losses.adios_loss import ADIOSLoss
-
-from visualizations import safe_visualization_wrapper
-
-from .helpers import (
-    save_iteration_masks_efficient,
-    worker_init_fn,
-    setup_ddp_model,
-    apply_crops_to_masked_images,
-    process_student_with_cached_masks_and_crops,
-)
+from losses.correspondence_loss import FeatureCorrespondenceLoss
+from training.helpers import worker_init_fn, save_iteration_masks_efficient
 
 
-def train_adios_tme(args):
+def load_template_bank(template_path):
     """
-    Main training function for ADIOS-TME with optimizations.
+    Load pre-computed template features.
+    
+    Expected pickle format:
+    {
+        'nuclei_features': [N_nuclei, D] tensor,
+        'background_features': [N_bg, D] tensor,
+    }
     """
-    # ============ Setup ============
-    utils.init_distributed_mode(args)
-    utils.fix_random_seeds(args.seed)
-    print("Starting ADIOS-TME training (OPTIMIZED)")
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    print(f"Loading template bank from {template_path}")
+    with open(template_path, 'rb') as f:
+        data = pickle.load(f)
     
-    # ============ Create models ============
+    nuclei_features = data['nuclei_features'].cuda()
+    background_features = data['background_features'].cuda()
     
-    # Student encoder
-    student_backbone = VisionTransformer(
+    print(f"  Nuclei templates: {nuclei_features.shape}")
+    print(f"  Background templates: {background_features.shape}")
+    
+    return nuclei_features, background_features
+
+
+def create_frozen_encoder(checkpoint_path, args):
+    """
+    Create and freeze ViT encoder from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to pretrained checkpoint
+        args: Training arguments
+        
+    Returns:
+        frozen_encoder: Frozen ViT model
+    """
+    print(f"Loading frozen encoder from {checkpoint_path}")
+    
+    encoder = VisionTransformer(
         img_size=224,
         patch_size=args.patch_size,
         embed_dim=args.embed_dim,
@@ -57,104 +72,151 @@ def train_adios_tme(args):
         num_heads=args.num_heads,
         mlp_ratio=4.0,
         qkv_bias=True,
-        drop_path_rate=0.4,
-        num_register_tokens=4,
-    )
-    
-    # TME head
-    tme_head = TMEHead(
-        in_dim=args.embed_dim,
-        hidden_dim=2048,
-        bottleneck_dim=256,
-        use_bn=False
-    )
-    
-    # Combined student model
-    student = TMEModel(
-        backbone=student_backbone,
-        tme_head=tme_head
-    )
-    
-    # Mask model (ViT-Tiny)
-    mask_encoder = VisionTransformer(
-        img_size=224,
-        patch_size=16,
-        embed_dim=192,
-        depth=12,
-        num_heads=3,
-        mlp_ratio=4.0,
         drop_path_rate=0.1,
         num_register_tokens=4,
     )
     
-    mask_model = MaskModel_SpectralNorm(
-        encoder=mask_encoder,
+    # Load weights
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    # Handle different checkpoint formats
+    if 'model' in checkpoint:
+        state_dict = checkpoint['model']
+    elif 'student' in checkpoint:
+        state_dict = checkpoint['student']
+    else:
+        state_dict = checkpoint
+    
+    # Remove 'module.' prefix if present
+    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    
+    # Load weights (strict=False in case of head mismatches)
+    msg = encoder.load_state_dict(state_dict, strict=False)
+    print(f"  Loaded with message: {msg}")
+    
+    # Freeze all parameters
+    for param in encoder.parameters():
+        param.requires_grad = False
+    
+    encoder.eval()
+    encoder.cuda()
+    
+    print("  Encoder frozen and ready")
+    
+    return encoder
+
+
+def create_mask_model(frozen_encoder, args):
+    """
+    Create mask model with frozen encoder backbone.
+    
+    The encoder is shared (frozen), only decoder is trainable.
+    
+    Args:
+        frozen_encoder: Pre-loaded frozen ViT
+        args: Training arguments
+        
+    Returns:
+        mask_model: MaskModel with trainable decoder
+    """
+    mask_model = MaskModel(
+        encoder=frozen_encoder,
         num_masks=args.num_masks,
-        encoder_dim=192,
+        encoder_dim=args.embed_dim,
         drop_rate=0.2
     )
     
-    # Reconstructor (ViT-Tiny)
-    reconstructor_encoder = VisionTransformer(
-        img_size=224,
-        patch_size=16,
-        embed_dim=192,
-        depth=12,
-        num_heads=3,
-        mlp_ratio=4.0,
-        drop_path_rate=0.1,
-        num_register_tokens=4,
-    )
+    # Verify encoder is frozen
+    for name, param in mask_model.encoder.parameters():
+        assert not param.requires_grad, f"Encoder param {name} is not frozen!"
     
-    reconstructor = ReconstructorModel(
-        encoder=reconstructor_encoder,
-        encoder_dim=192,
-        drop_rate=0.2
-    )
+    # Count trainable parameters (should only be decoder)
+    trainable = sum(p.numel() for p in mask_model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in mask_model.parameters())
+    print(f"Mask model: {trainable:,} trainable / {total:,} total parameters")
     
-    # Move to GPU
-    student = student.cuda()
-    mask_model = mask_model.cuda()
-    reconstructor = reconstructor.cuda()
+    mask_model.cuda()
     
-    # Setup DDP
-    student = setup_ddp_model(student, args, find_unused=False)
-    mask_model = setup_ddp_model(mask_model, args, find_unused=False)
-    reconstructor = setup_ddp_model(reconstructor, args, find_unused=False)
+    return mask_model
+
+
+def extract_features(encoder, images):
+    """
+    Extract features from unmasked images.
     
-    # Set static graph for efficiency
-    student._set_static_graph()
-    mask_model._set_static_graph()
-    reconstructor._set_static_graph()
+    Args:
+        encoder: Frozen ViT encoder
+        images: [B, 3, H, W]
+        
+    Returns:
+        features: [B, D, H_feat, W_feat]
+    """
+    with torch.no_grad():
+        # Get intermediate layers
+        layer_features = encoder.get_intermediate_layers(images)
+        
+        # Use last layer
+        features = layer_features[-1]  # [B, N+5, D] (cls + 4 registers + patches)
+        
+        # Extract patch tokens only (remove cls and registers)
+        patch_features = features[:, 5:, :]  # [B, N_patches, D]
+        
+        # Reshape to spatial
+        B, N, D = patch_features.shape
+        H_feat = W_feat = int(N ** 0.5)
+        features_spatial = patch_features.reshape(B, H_feat, W_feat, D).permute(0, 3, 1, 2)
+        # [B, D, H_feat, W_feat]
+        
+    return features_spatial
+
+
+def train_semantic_grounding(args):
+    """
+    Main training function with semantic grounding.
+    """
+    # ============ Setup ============
+    utils.init_distributed_mode(args)
+    utils.fix_random_seeds(args.seed)
+    print("Starting semantic grounding training")
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # ============ Load template bank ============
+    nuclei_bank, background_bank = load_template_bank(args.template_path)
+    
+    # ============ Create models ============
+    
+    # Frozen encoder (shared for both feature extraction and mask model)
+    frozen_encoder = create_frozen_encoder(args.checkpoint_path, args)
+    
+    # Mask model (uses same frozen encoder + trainable decoder)
+    mask_model = create_mask_model(frozen_encoder, args)
+    
+    # Wrap in DDP if multi-GPU
+    if args.world_size > 1:
+        mask_model = nn.parallel.DistributedDataParallel(
+            mask_model,
+            device_ids=[args.gpu],
+            find_unused_parameters=False,
+        )
+        mask_model._set_static_graph()
     
     # ============ Create loss ============
-    adios_loss = ADIOSLoss(
-        alpha_sparsity=0.1,
-        img_size=224,
-        initial_temp=0.2,
-        final_temp=0.05,
-        total_iters=args.total_iterations,
+    correspondence_loss = FeatureCorrespondenceLoss(
+        temperature=args.temperature,
+        top_k=args.top_k_patches,
+        diversity_weight=args.diversity_weight,
+        sparsity_weight=args.sparsity_weight,
     ).cuda()
     
-    # ============ Create optimizers ============
-    student_optimizer = torch.optim.AdamW(
-        student.parameters(),
+    # ============ Create optimizer ============
+    # Only decoder parameters are trainable
+    optimizer = torch.optim.AdamW(
+        [p for p in mask_model.parameters() if p.requires_grad],
         lr=args.lr,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
     )
     
-    mask_optimizer = torch.optim.AdamW(
-        mask_model.parameters(),
-        lr=args.lr * 0.1,
-        weight_decay=args.weight_decay
-    )
-    
-    reconstructor_optimizer = torch.optim.AdamW(
-        reconstructor.parameters(),
-        lr=args.lr * 0.1,
-        weight_decay=args.weight_decay
-    )
-
+    # Learning rate schedule
     lr_schedule = utils.cosine_scheduler(
         base_value=args.lr,
         final_value=args.min_lr,
@@ -162,14 +224,14 @@ def train_adios_tme(args):
         warmup_iters=args.warmup_iterations,
     )
     
-    # ============ Setup fp16/bfloat16 scaler ============
-    fp16_scaler = None
+    # ============ Setup mixed precision ============
     use_amp = args.use_fp16
-    amp_dtype = torch.bfloat16  # Use bfloat16 for better stability
+    amp_dtype = torch.bfloat16
+    fp16_scaler = None
     
     if use_amp:
         fp16_scaler = torch.cuda.amp.GradScaler()
-        print(f"Using automatic mixed precision with {amp_dtype}")
+        print(f"Using mixed precision with {amp_dtype}")
     
     # ============ Create dataset ============
     dataset = ADIOSPathologyDataset(
@@ -178,7 +240,7 @@ def train_adios_tme(args):
         img_size=args.img_size,
         max_samples=None,
     )
-
+    
     data_loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size_per_gpu,
@@ -186,259 +248,124 @@ def train_adios_tme(args):
         drop_last=True,
         pin_memory=True,
         persistent_workers=True,
-        worker_init_fn=worker_init_fn
+        worker_init_fn=worker_init_fn,
     )
     
-    # Resume from checkpoint if exists
+    # ============ Resume from checkpoint ============
     to_restore = {"iteration": 0}
     utils.restart_from_checkpoint(
         os.path.join(args.output_dir, "checkpoint.pth"),
         run_variables=to_restore,
-        student=student,
         mask_model=mask_model,
-        reconstructor=reconstructor,
-        student_optimizer=student_optimizer,
-        mask_optimizer=mask_optimizer,
-        reconstructor_optimizer=reconstructor_optimizer,
+        optimizer=optimizer,
         fp16_scaler=fp16_scaler,
     )
     start_iteration = to_restore["iteration"]
-
+    
     # ============ Training loop ============
     iteration = start_iteration
     metric_logger = utils.IterationMetricLogger(total_iterations=args.total_iterations)
     
-    # Multi-crop configuration
-    crops_per_mask = getattr(args, 'crops_per_mask', 2)  # Default: 2 crops per mask
-    print(f"Using {crops_per_mask} crops per mask for multi-scale training")
+    print("Starting training loop...")
     
     for data in data_loader:
         if iteration >= args.total_iterations:
             break
         
-        # Get original image
-        original_image = data.cuda(non_blocking=True)
-        batch_size = original_image.shape[0]
-
+        # Get images
+        images = data.cuda(non_blocking=True)  # [B, 3, 224, 224]
+        
         # Update learning rate
-        for param_group in student_optimizer.param_groups:
+        for param_group in optimizer.param_groups:
             param_group['lr'] = lr_schedule[iteration]
         
-        # ============ CRITICAL OPTIMIZATION: Cache masks once per iteration ============
-        # This dramatically reduces memory usage by avoiding redundant forward passes
-        mask_model.eval()
-        with torch.no_grad():
-            # Generate masks ONCE and cache them
-            cached_mask_output = mask_model(original_image)
-            cached_masks = cached_mask_output["masks"].clone()  # Clone to ensure no graph retention
-            
-            crop_params = None
+        # ============ Forward pass ============
         
-        # Clean up the original output to free memory
-        del cached_mask_output
-        torch.cuda.empty_cache()
-
-        # ============ Phase 1: Train Student (Inpainter) ============
-        student.train()
-        student_optimizer.zero_grad()
-
+        # Step 1: Extract features with frozen encoder (no masking)
+        features = extract_features(frozen_encoder, images)  # [B, D, 14, 14]
+        
+        # Step 2: Generate masks
+        mask_model.train()
+        optimizer.zero_grad()
+        
         with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-            # Use the efficient cached masks + crops function
-            student_loss, student_metrics = process_student_with_cached_masks_and_crops(
-                student=student,
-                cached_masks=cached_masks,
-                original_image=original_image,
-                crop_params=crop_params,
-                K=crops_per_mask,
-                current_iteration=iteration,
-                adios_loss=adios_loss,
-                num_masks=args.num_masks
+            # Forward through mask model
+            mask_output = mask_model(images)
+            masks = mask_output['masks']  # [B, 3, 224, 224]
+            
+            # Compute correspondence loss
+            loss, metrics = correspondence_loss(
+                features=features,
+                masks=masks,
+                nuclei_bank=nuclei_bank,
+                background_bank=background_bank,
             )
         
-        # Backward with gradient scaling
+        # ============ Backward pass ============
         if fp16_scaler is not None:
-            fp16_scaler.scale(student_loss).backward()
+            fp16_scaler.scale(loss).backward()
             
             if args.clip_grad:
-                fp16_scaler.unscale_(student_optimizer)
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                fp16_scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in mask_model.parameters() if p.requires_grad],
+                    args.clip_grad
+                )
             
-            fp16_scaler.step(student_optimizer)
+            fp16_scaler.step(optimizer)
             fp16_scaler.update()
         else:
-            student_loss.backward()
+            loss.backward()
             
             if args.clip_grad:
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in mask_model.parameters() if p.requires_grad],
+                    args.clip_grad
+                )
             
-            student_optimizer.step()
-
-        # ============ Phase 2 & 3: Update reconstructor and mask model ============
-        mask_loss = torch.tensor(0.0)
-        mask_metrics = {'similarity': 0.0, 'sparsity': 0.0}
+            optimizer.step()
         
-        if iteration % args.mask_update_freq == 0:
-            # Phase 2: Train Reconstructor
-            student.eval()
-            reconstructor.train()
-            reconstructor_optimizer.zero_grad()
-
-            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-                # Create hybrid input using cached masks
-                content_mask = cached_masks[:, 0:1, :, :]
-                guidance_mask_g = cached_masks[:, 1:2, :, :] if cached_masks.shape[1] > 1 else torch.zeros_like(content_mask)
-                guidance_mask_b = cached_masks[:, 2:3, :, :] if cached_masks.shape[1] > 2 else torch.zeros_like(content_mask)
-
-                hybrid_input = torch.zeros_like(original_image)
-                hybrid_input[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
-                hybrid_input[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
-                                            guidance_mask_g * (1 - content_mask))
-                hybrid_input[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
-                                            guidance_mask_b * (1 - content_mask))
-
-                reconstructed = reconstructor(hybrid_input)
-                recon_loss = F.l1_loss(reconstructed, original_image)
-
-            if fp16_scaler is not None:
-                fp16_scaler.scale(recon_loss).backward()
-                if args.clip_grad:
-                    fp16_scaler.unscale_(reconstructor_optimizer)
-                    torch.nn.utils.clip_grad_norm_(reconstructor.parameters(), args.clip_grad)
-                fp16_scaler.step(reconstructor_optimizer)
-                fp16_scaler.update()
-            else:
-                recon_loss.backward()
-                if args.clip_grad:
-                    torch.nn.utils.clip_grad_norm_(reconstructor.parameters(), args.clip_grad)
-                reconstructor_optimizer.step()
-
-            metric_logger.update(recon_loss=recon_loss.item())
-            
-            # ============ Phase 3: Update Mask Model ============
-            student.eval()
-            mask_model.train()
-            reconstructor.eval()
-            mask_optimizer.zero_grad()
-
-            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-                # Generate FRESH masks for mask model training
-                mask_output = mask_model(original_image)
-                fresh_masks = mask_output['masks']
-                
-                # Create masked images
-                masked_images = []
-                for i in range(args.num_masks):
-                    mask = fresh_masks[:, i:i+1, :, :]
-                    masked_img = original_image * (1 - mask)
-                    masked_images.append(masked_img)
-                
-                # Forward through student
-                all_embeddings = student([original_image] + masked_images)
-                original_emb = all_embeddings[0]
-                masked_embs = all_embeddings[1:]
-                
-                # Compute adversarial loss (mask tries to maximize contrastive loss)
-                # NOTE: K=0 for mask model training (no crops in adversarial phase)
-                mask_loss, mask_metrics = adios_loss(
-                    original_emb,
-                    masked_embs,
-                    masks=fresh_masks,
-                    iteration=iteration,
-                    forward_type='mask',
-                    num_base_masks=args.num_masks,  # ✅ Pass this
-                    K=0  # ✅ No crops for mask model training
-                )
-                
-                # Add reconstruction reward
-                with torch.no_grad():
-                    hybrid_test = torch.zeros_like(original_image)
-                    content_mask = fresh_masks[:, 0:1, :, :]
-                    hybrid_test[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
-                    if fresh_masks.shape[1] > 1:
-                        guidance_mask_g = fresh_masks[:, 1:2, :, :]
-                        hybrid_test[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
-                                                    guidance_mask_g * (1 - content_mask))
-                    if fresh_masks.shape[1] > 2:
-                        guidance_mask_b = fresh_masks[:, 2:3, :, :]
-                        hybrid_test[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
-                                                    guidance_mask_b * (1 - content_mask))
-                    
-                    reconstructed_test = reconstructor(hybrid_test)
-                    recon_error = F.l1_loss(reconstructed_test, original_image)
-                    
-                # Combine: adversarial 
-                total_mask_loss = mask_loss 
-
-            if fp16_scaler is not None:
-                fp16_scaler.scale(total_mask_loss).backward()
-                if args.clip_grad:
-                    fp16_scaler.unscale_(mask_optimizer)
-                    torch.nn.utils.clip_grad_norm_(mask_model.parameters(), args.clip_grad)
-                fp16_scaler.step(mask_optimizer)
-                fp16_scaler.update()
-            else:
-                total_mask_loss.backward()
-                if args.clip_grad:
-                    torch.nn.utils.clip_grad_norm_(mask_model.parameters(), args.clip_grad)
-                mask_optimizer.step()
-
-            metric_logger.update(mask_adversarial_loss=mask_loss.item())
-            metric_logger.update(mask_total_loss=total_mask_loss.item())
-
-        # ============ Visualization ============
-        if iteration % args.viz_freq == 0:
-            sample_image = original_image[:1]
-            with torch.no_grad():
-                vis_masks = mask_model(sample_image)['masks']
-                
-                reconstructed_images = None
-                if reconstructor is not None:
-                    content_mask = vis_masks[:, 0:1, :, :]
-                    hybrid_input = torch.zeros_like(sample_image)
-                    hybrid_input[:, 0:1, :, :] = sample_image[:, 0:1, :, :] * content_mask
-                    
-                    reconstructed_images = reconstructor(hybrid_input)
-                
-                safe_visualization_wrapper(
-                    sample_image,
-                    vis_masks,
-                    iteration,
-                    os.path.join(args.output_dir, 'visualizations', 'masks'),
-                    reconstructed_images
-                )
-
-        # Clean up cached masks
-        del cached_masks
-        if crop_params is not None:
-            del crop_params
-        torch.cuda.empty_cache()
-
         # ============ Logging ============
-        metric_logger.update(student_loss=student_loss.item())
-        metric_logger.update(mask_loss=mask_loss.item())
-        metric_logger.update(**student_metrics)
-        metric_logger.update(**mask_metrics)
+        metric_logger.update(total_loss=loss.item())
+        metric_logger.update(**metrics)
+        metric_logger.update(lr=optimizer.param_groups[0]['lr'])
         
         if iteration % 10 == 0 and utils.is_main_process():
-            print(f"Iteration {iteration}: {metric_logger}")
+            print(f"Iteration {iteration}/{args.total_iterations}: {metric_logger}")
+        
+        # ============ Visualization ============
+        if iteration % args.viz_freq == 0 and utils.is_main_process():
+            with torch.no_grad():
+                sample_image = images[:1]
+                sample_masks = masks[:1]
+                
+                save_iteration_masks_efficient(
+                    sample_image,
+                    sample_masks,
+                    iteration,
+                    os.path.join(args.output_dir, 'visualizations', 'masks'),
+                    reconstructed_images=None,
+                    num_samples=1,
+                )
         
         # ============ Checkpoint ============
-        if iteration % args.save_freq == 0:
+        if iteration % args.save_freq == 0 and utils.is_main_process():
             save_dict = {
-                'student': student.state_dict(),
                 'mask_model': mask_model.state_dict(),
-                'reconstructor': reconstructor.state_dict(),
-                'student_optimizer': student_optimizer.state_dict(),
-                'mask_optimizer': mask_optimizer.state_dict(),
-                'reconstructor_optimizer': reconstructor_optimizer.state_dict(),
+                'optimizer': optimizer.state_dict(),
                 'iteration': iteration,
                 'args': args,
             }
             
             if fp16_scaler is not None:
                 save_dict['fp16_scaler'] = fp16_scaler.state_dict()
-                
-            utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
+            
+            torch.save(
+                save_dict,
+                os.path.join(args.output_dir, 'checkpoint.pth')
+            )
+            
+            print(f"Saved checkpoint at iteration {iteration}")
         
         iteration += 1
     
