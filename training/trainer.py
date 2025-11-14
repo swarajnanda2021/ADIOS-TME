@@ -105,7 +105,7 @@ def create_frozen_encoder(checkpoint_path, args):
     print("  Encoder frozen and ready")
     
     return encoder
-    
+
 
 def create_mask_model(frozen_encoder, args):
     """
@@ -128,7 +128,7 @@ def create_mask_model(frozen_encoder, args):
     )
     
     # Verify encoder is frozen
-    for name, param in mask_model.encoder.parameters():
+    for name, param in mask_model.encoder.named_parameters():
         assert not param.requires_grad, f"Encoder param {name} is not frozen!"
     
     # Count trainable parameters (should only be decoder)
