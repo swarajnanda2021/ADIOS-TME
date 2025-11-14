@@ -1,5 +1,5 @@
 """
-Submitit launcher for ADIOS-TME training on SLURM clusters.
+Submitit launcher for STEGO-TME training on SLURM clusters.
 """
 
 import argparse
@@ -62,7 +62,7 @@ class Trainer(object):
     def __call__(self):
         """Main training call."""
         self._setup_gpu_args()
-        train_adios_tme(self.args)
+        train_semantic_grounding(self.args)
 
     def checkpoint(self):
         """Checkpoint for job preemption."""
@@ -91,7 +91,7 @@ def main():
     executor = submitit.AutoExecutor(folder=args.output_dir, slurm_max_num_timeout=30)
 
     # Job name with timestamp
-    job_name = f"adios_tme_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    job_name = f"stego_tme_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # Slurm parameters
     num_gpus_per_node = args.ngpus
@@ -169,7 +169,7 @@ def main():
     # Save configuration
     config_file = os.path.join(args.output_dir, f"{job_name}_config.txt")
     with open(config_file, "w") as f:
-        f.write("ADIOS-TME Training Configuration\n")
+        f.write("STEGO-TME Training Configuration\n")
         f.write("=" * 80 + "\n\n")
         for arg, value in sorted(vars(args).items()):
             f.write(f"{arg}: {value}\n")
