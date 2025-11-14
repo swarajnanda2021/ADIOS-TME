@@ -293,9 +293,12 @@ class MaskModel_SpectralNorm(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
                     
-            elif isinstance(m, nn.InstanceNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
+                # Check if the norm layer has learnable parameters
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
         # Initialize shared decoders
         self.decoder0.apply(init_fn)
@@ -338,9 +341,12 @@ class MaskModel_SpectralNorm(nn.Module):
                     if module.bias is not None:
                         nn.init.constant_(module.bias, idx * 0.01)
                         
-                elif isinstance(module, nn.InstanceNorm2d):
-                    nn.init.constant_(module.weight, 1.0 + idx * 0.05)
-                    nn.init.constant_(module.bias, idx * 0.01)
+                elif isinstance(module, (nn.BatchNorm2d, nn.InstanceNorm2d)):
+                    # Check if the norm layer has learnable parameters
+                    if module.weight is not None:
+                        nn.init.constant_(module.weight, 1.0 + idx * 0.05)
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, idx * 0.01)
             
             # Restore RNG state
             torch.set_rng_state(rng_state)
