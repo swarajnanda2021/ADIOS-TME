@@ -199,7 +199,6 @@ def main():
     print()
     print(f"Mask Configuration:")
     print(f"  Num masks: {args.num_masks}")
-    print(f"  Mask update freq: {args.mask_update_freq}")
     print()
     print(f"Training:")
     print(f"  Batch size per GPU: {args.batch_size_per_gpu}")
