@@ -754,12 +754,12 @@ class MaskModel(nn.Module):
         rng_state = torch.get_rng_state()
         
         # Set unique seed for this decoder
-        torch.manual_seed(42 + idx * 100)  # Larger separation between seeds
+        torch.manual_seed(42)  # Larger separation between seeds
         
         # Apply initialization with progressive scaling
         for module in self.mask_decoder.modules():
             if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
-                scale_factor = 1.0 + (idx * 0.1)  # Progressive scaling
+                scale_factor = 1.0 # Progressive scaling
                 
                 if hasattr(module, 'weight_orig'):  # Has spectral norm
                     # Kaiming initialization with custom scale
@@ -772,23 +772,23 @@ class MaskModel(nn.Module):
                     nn.init.normal_(module.weight, mean=0, std=std)
                 
                 if module.bias is not None:
-                    nn.init.constant_(module.bias, idx * 0.01)
+                    nn.init.constant_(module.bias, 0.01)
                     
             elif isinstance(module, nn.Linear):
                 if hasattr(module, 'weight_orig'):
-                    nn.init.xavier_normal_(module.weight_orig, gain=1.0 + idx * 0.05)
+                    nn.init.xavier_normal_(module.weight_orig, gain=1.0 + 0.05)
                 else:
-                    nn.init.xavier_normal_(module.weight, gain=1.0 + idx * 0.05)
+                    nn.init.xavier_normal_(module.weight, gain=1.0 + 0.05)
                 
                 if module.bias is not None:
-                    nn.init.constant_(module.bias, idx * 0.01)
+                    nn.init.constant_(module.bias, 0.01)
                     
             elif isinstance(module, (nn.BatchNorm2d, nn.InstanceNorm2d)):
                 # Check if the norm layer has learnable parameters
                 if module.weight is not None:
-                    nn.init.constant_(module.weight, 1.0 + idx * 0.05)
+                    nn.init.constant_(module.weight, 1.0 + 0.05)
                 if module.bias is not None:
-                    nn.init.constant_(module.bias, idx * 0.01)
+                    nn.init.constant_(module.bias, 0.01)
         
             # Restore RNG state
             torch.set_rng_state(rng_state)
