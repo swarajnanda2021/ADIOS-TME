@@ -383,7 +383,6 @@ def train_adios_tme(args):
                 mask_optimizer.step()
 
             metric_logger.update(mask_adversarial_loss=mask_loss.item())
-            metric_logger.update(reconstruction_reward=reconstruction_reward.item())
             metric_logger.update(mask_total_loss=total_mask_loss.item())
 
         # ============ Visualization ============
