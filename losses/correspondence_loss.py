@@ -191,6 +191,7 @@ class FeatureCorrespondenceLoss(nn.Module):
         )
         bg_features, bg_weights = self.select_top_k_patches(
             features, background_mask
+        )
         
         # Alignment losses (contrastive)
         L_nuclei = self.contrastive_alignment(
