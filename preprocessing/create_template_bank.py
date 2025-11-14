@@ -289,7 +289,7 @@ def main():
                        default='/data1/vanderbc/nandas1/Benchmarks/PanNuke_patches_unnormalized',
                        type=str, help='Path to PanNuke dataset')
     parser.add_argument('--checkpoint_path',
-                       default='path/to/pretrained_vit.pth',
+                       default='/data1/vanderbc/nandas1/TCGA_Dinov2_ViT-B_run2/logs/checkpoint.pth',
                        type=str, help='Path to pretrained ViT checkpoint')
     parser.add_argument('--output_path',
                        default='./templates/pannuke_features.pkl',
