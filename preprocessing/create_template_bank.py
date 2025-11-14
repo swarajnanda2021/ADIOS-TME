@@ -12,6 +12,13 @@ Usage:
         --mask_threshold 0.5
 """
 
+import sys
+import os
+
+# Add project root to path to allow imports
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 import torch
 import pickle
 import argparse
@@ -282,7 +289,7 @@ def main():
                        default='/data1/vanderbc/nandas1/Benchmarks/PanNuke_patches_unnormalized',
                        type=str, help='Path to PanNuke dataset')
     parser.add_argument('--checkpoint_path',
-                       default='/data1/vanderbc/nandas1/TCGA_TMEDinov2_ViT-B/logs/checkpoint.pth',
+                       default='path/to/pretrained_vit.pth',
                        type=str, help='Path to pretrained ViT checkpoint')
     parser.add_argument('--output_path',
                        default='./templates/pannuke_features.pkl',
