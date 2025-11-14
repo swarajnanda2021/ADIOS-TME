@@ -708,21 +708,90 @@ class MaskModel(nn.Module):
 
 
     def initialize_weights(self):
+        """
+        Initialize weights, handling spectral norm properly.
+        After spectral_norm is applied, the weight parameter becomes 'weight_orig'
+        """
         def init_fn(m):
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if isinstance(m, nn.Conv2d):
+                if hasattr(m, 'weight_orig'):  # Has spectral norm
+                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+                    
+            elif isinstance(m, nn.ConvTranspose2d):
+                if hasattr(m, 'weight_orig'):  # Has spectral norm
+                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    
             elif isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
+                if hasattr(m, 'weight_orig'):  # Has spectral norm
+                    nn.init.xavier_normal_(m.weight_orig)
+                else:
+                    nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
+                # Check if the norm layer has learnable parameters
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-        # Apply initialization to all modules (including Deconv2DBlock)
-        self.apply(init_fn)
+        # Initialize shared decoders
+        self.decoder0.apply(init_fn)
+        self.decoder1.apply(init_fn)
+        self.decoder2.apply(init_fn)
+        self.decoder3.apply(init_fn)
+
+        # Save current RNG state
+        rng_state = torch.get_rng_state()
+        
+        # Set unique seed for this decoder
+        torch.manual_seed(42 + idx * 100)  # Larger separation between seeds
+        
+        # Apply initialization with progressive scaling
+        for module in self.mask_decoder.modules():
+            if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
+                scale_factor = 1.0 + (idx * 0.1)  # Progressive scaling
+                
+                if hasattr(module, 'weight_orig'):  # Has spectral norm
+                    # Kaiming initialization with custom scale
+                    fan_out = module.weight_orig.size(0) * module.weight_orig[0].numel()
+                    std = np.sqrt(2.0 * scale_factor / fan_out)
+                    nn.init.normal_(module.weight_orig, mean=0, std=std)
+                else:
+                    fan_out = module.weight.size(0) * module.weight[0].numel()
+                    std = np.sqrt(2.0 * scale_factor / fan_out)
+                    nn.init.normal_(module.weight, mean=0, std=std)
+                
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, idx * 0.01)
+                    
+            elif isinstance(module, nn.Linear):
+                if hasattr(module, 'weight_orig'):
+                    nn.init.xavier_normal_(module.weight_orig, gain=1.0 + idx * 0.05)
+                else:
+                    nn.init.xavier_normal_(module.weight, gain=1.0 + idx * 0.05)
+                
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, idx * 0.01)
+                    
+            elif isinstance(module, (nn.BatchNorm2d, nn.InstanceNorm2d)):
+                # Check if the norm layer has learnable parameters
+                if module.weight is not None:
+                    nn.init.constant_(module.weight, 1.0 + idx * 0.05)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, idx * 0.01)
+        
+            # Restore RNG state
+            torch.set_rng_state(rng_state)
 
     def create_upsampling_branch(self, num_classes: int) -> nn.Module:
         bottleneck_upsampler = nn.ConvTranspose2d(
