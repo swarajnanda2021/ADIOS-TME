@@ -207,7 +207,7 @@ class FeatureCorrespondenceLoss(nn.Module):
         # Total loss
         total_loss = (
             L_nuclei +
-            L_background +
+            L_background
         )
         
         # Metrics
