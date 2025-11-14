@@ -11,13 +11,13 @@ from pathlib import Path
 import submitit
 
 from configs.config import get_args_parser
-from training.trainer import train_adios_tme
+from training.trainer import train_semantic_grounding
 
 
 def parse_args():
     """Parse submitit and training arguments."""
     parser = argparse.ArgumentParser(
-        "Submitit for ADIOS-TME", 
+        "Submitit for STEGO-TME", 
         parents=[get_args_parser()]
     )
     
@@ -127,49 +127,39 @@ def main():
     args.embed_dim = 768
     args.num_heads = 12
     args.depth = 12
-    args.mlp_ratio = 4.0
 
-    # ========== TME Head Configuration ==========
-    args.tme_hidden_dim = 2048
-    args.tme_output_dim = 256
-    args.tme_layers = 3
-
-    # ========== Mask Model Configuration ==========
+    # ========== Mask Model ==========
     args.num_masks = 3
-    args.mask_encoder_dim = 192
-    args.mask_encoder_depth = 12
-    args.mask_update_freq = 5
     args.mask_dropout = 0.2
 
-    # ========== ADIOS Loss Configuration ==========
-    args.alpha_sparsity = 0.1
-    args.initial_temp = 0.2
-    args.final_temp = 0.05
-    args.reconstruction_weight = 0.1
+    # ========== Semantic Grounding ==========
+    args.checkpoint_path = "/path/to/pretrained_vit.pth"  # TODO: Set this
+    args.template_path = "/path/to/pannuke_templates.pkl"  # TODO: Set this
+    args.temperature = 0.07
+    args.top_k_patches = 20
+    args.diversity_weight = 0.1
+    args.sparsity_weight = 0.1
 
-    # ========== Training Configuration ==========
+    # ========== Training ==========
     args.batch_size_per_gpu = 64
-    args.total_iterations = 300_000
-    args.warmup_iterations = 10_000
-    args.lr = 5e-5
+    args.total_iterations = 100_000
+    args.warmup_iterations = 5_000
+    args.lr = 1e-4
     args.min_lr = 1e-6
     args.weight_decay = 0.04
     args.clip_grad = 1.0
-
-    # ========== Training Setup ==========
     args.use_fp16 = True
-    args.grad_checkpointing = True
+
+    # ========== Data ==========
+    args.data_path = "/data1/vanderbc/foundation_model_training_images/TCGA"
+    args.img_size = 224
     args.num_workers = 8
 
-    # ========== Logging & Checkpointing ==========
+    # ========== Logging ==========
     args.save_freq = 2_000
     args.log_freq = 10
     args.viz_freq = 500
-
-    # ========== Dataset Configuration ==========
-    args.data_path = "/data1/vanderbc/foundation_model_training_images/TCGA"
-    args.img_size = 224
-
+    
     # ========== Calculate Effective Batch Size ==========
     effective_batch_size = args.batch_size_per_gpu * num_gpus_per_node * nodes
     

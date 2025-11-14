@@ -77,7 +77,7 @@ def create_frozen_encoder(checkpoint_path, args):
     )
     
     # Load weights
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Handle different checkpoint formats
     if 'model' in checkpoint:
