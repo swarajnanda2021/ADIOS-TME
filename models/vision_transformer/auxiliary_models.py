@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from utils import trunc_normal_
 from collections import OrderedDict
 import numpy as np
-
+import torch.nn.utils.spectral_norm as spectral_norm
 
 
 class DINOHead(nn.Module):
@@ -196,6 +196,7 @@ class MaskModel_SpectralNorm(nn.Module):
         self.encoder = encoder
         self.num_masks = num_masks
         
+        # Freeze encoder
         for parameter in self.encoder.parameters():
             parameter.requires_grad = False
             
@@ -212,12 +213,11 @@ class MaskModel_SpectralNorm(nn.Module):
             self.skip_dim_12 = 256
             self.bottleneck_dim = 512
         else:
-            # Dimensions for ViT-Large and larger models
             self.skip_dim_11 = 768
             self.skip_dim_12 = 384
             self.bottleneck_dim = 768
             
-        # Shared decoder blocks
+        # Shared decoder blocks (without spectral norm yet)
         self.decoder0 = nn.Sequential(
             Conv2DBlock(3, 32, 3, dropout=self.drop_rate),
             Conv2DBlock(32, 64, 3, dropout=self.drop_rate),
@@ -235,83 +235,67 @@ class MaskModel_SpectralNorm(nn.Module):
             Deconv2DBlock(self.embed_dim, self.bottleneck_dim, dropout=self.drop_rate)
         )
 
-        # Single decoder for all masks
-        # self.mask_decoder = self.create_upsampling_branch(num_masks)
         # Separate decoders for each mask
         self.mask_decoders = nn.ModuleList([
             self.create_upsampling_branch(1) for _ in range(num_masks)
         ])
         
-        self.initialize_weights()
-
-        # Apply spectral norm to all decoder layers
+        # Apply spectral norm to all decoders
         self.apply_spectral_norm_to_decoder(self.decoder0)
         self.apply_spectral_norm_to_decoder(self.decoder1)
         self.apply_spectral_norm_to_decoder(self.decoder2)
         self.apply_spectral_norm_to_decoder(self.decoder3)
         for decoder in self.mask_decoders:
             self.apply_spectral_norm_to_decoder(decoder)
+        
+        # Initialize weights AFTER applying spectral norm
+        self.initialize_weights()
 
-    def set_grad_checkpointing(self, enable=True):
-        """Enable or disable gradient checkpointing in the encoder"""
-        if hasattr(self.encoder, 'set_grad_checkpointing'):
-            self.encoder.set_grad_checkpointing(enable)
-            print(f"Gradient checkpointing set to {enable} in MaskModel encoder")
-        else:
-            print("Warning: MaskModel encoder does not support gradient checkpointing")
-
-    def apply_spectral_norm_to_decoder(self,decoder_module):
+    def apply_spectral_norm_to_decoder(self, decoder_module):
         """
-        Applies spectral normalization to all convolutional and linear layers in a decoder module,
-        excluding batch norm and activation functions.
+        Apply PyTorch's spectral normalization to all conv/linear layers in decoder.
         """
         for name, module in decoder_module.named_children():
             if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
-                SpectralNorm.apply(module, 'weight', n_power_iterations=1, dim=0, eps=1e-12)
-            elif isinstance(module, nn.Sequential):
+                # Apply PyTorch's spectral normalization
+                spectral_norm(module, name='weight', n_power_iterations=1, eps=1e-12, dim=0)
+            elif isinstance(module, (nn.Sequential, nn.ModuleList)):
+                # Recursively apply to nested modules
                 self.apply_spectral_norm_to_decoder(module)
-
-    def single_decoder_initialize_weights(self):
-        def init_fn(m):
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-        # Apply initialization to all modules
-        self.apply(init_fn)
-        
-        # For single decoder head
-        # Special initialization for Deconv2DBlock
-        for module in self.modules():
-            if isinstance(module, Deconv2DBlock):
-                for layer in module.block:
-                    if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d)):
-                        nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
-                        if layer.bias is not None:
-                            nn.init.constant_(layer.bias, 0)
-                            
+    
     def initialize_weights(self):
-        # First initialize shared components
+        """
+        Initialize weights, handling spectral norm properly.
+        After spectral_norm is applied, the weight parameter becomes 'weight_orig'
+        """
         def init_fn(m):
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if isinstance(m, nn.Conv2d):
+                if hasattr(m, 'weight_orig'):  # Has spectral norm
+                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
+                    
+            elif isinstance(m, nn.ConvTranspose2d):
+                if hasattr(m, 'weight_orig'):  # Has spectral norm
+                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    
+            elif isinstance(m, nn.Linear):
+                if hasattr(m, 'weight_orig'):  # Has spectral norm
+                    nn.init.xavier_normal_(m.weight_orig)
+                else:
+                    nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    
+            elif isinstance(m, nn.InstanceNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
 
         # Initialize shared decoders
         self.decoder0.apply(init_fn)
@@ -319,37 +303,50 @@ class MaskModel_SpectralNorm(nn.Module):
         self.decoder2.apply(init_fn)
         self.decoder3.apply(init_fn)
 
-        # Initialize each mask decoder with different random seeds and scales
+        # Initialize each mask decoder with different seeds for diversity
         for idx, decoder in enumerate(self.mask_decoders):
-            # Set a different random seed for each decoder
-            torch.manual_seed(42 + idx)  # Different seed for each decoder
+            # Save current RNG state
+            rng_state = torch.get_rng_state()
             
+            # Set unique seed for this decoder
+            torch.manual_seed(42 + idx * 100)  # Larger separation between seeds
+            
+            # Apply initialization with progressive scaling
             for module in decoder.modules():
                 if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
-                    # Scale the initialization variance differently for each decoder
-                    scale = 1.0 + (idx * 0.1)  # Each decoder gets progressively larger init
-                    nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu', a=scale)
+                    scale_factor = 1.0 + (idx * 0.1)  # Progressive scaling
+                    
+                    if hasattr(module, 'weight_orig'):  # Has spectral norm
+                        # Kaiming initialization with custom scale
+                        fan_out = module.weight_orig.size(0) * module.weight_orig[0].numel()
+                        std = np.sqrt(2.0 * scale_factor / fan_out)
+                        nn.init.normal_(module.weight_orig, mean=0, std=std)
+                    else:
+                        fan_out = module.weight.size(0) * module.weight[0].numel()
+                        std = np.sqrt(2.0 * scale_factor / fan_out)
+                        nn.init.normal_(module.weight, mean=0, std=std)
+                    
                     if module.bias is not None:
-                        # Add small offset to biases based on decoder index
                         nn.init.constant_(module.bias, idx * 0.01)
-                elif isinstance(module, nn.BatchNorm2d):
-                    # Slightly different starting points for BatchNorm
-                    nn.init.constant_(module.weight, 1.0 + (idx * 0.05))
+                        
+                elif isinstance(module, nn.Linear):
+                    if hasattr(module, 'weight_orig'):
+                        nn.init.xavier_normal_(module.weight_orig, gain=1.0 + idx * 0.05)
+                    else:
+                        nn.init.xavier_normal_(module.weight, gain=1.0 + idx * 0.05)
+                    
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, idx * 0.01)
+                        
+                elif isinstance(module, nn.InstanceNorm2d):
+                    nn.init.constant_(module.weight, 1.0 + idx * 0.05)
                     nn.init.constant_(module.bias, idx * 0.01)
-
-                # Special handling for Deconv2DBlock
-                if isinstance(module, Deconv2DBlock):
-                    for layer in module.block:
-                        if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d)):
-                            scale = 1.0 + (idx * 0.1)
-                            nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu', a=scale)
-                            if layer.bias is not None:
-                                nn.init.constant_(layer.bias, idx * 0.01)
-
-        # Reset RNG state after initialization
-        torch.manual_seed(torch.initial_seed())
+            
+            # Restore RNG state
+            torch.set_rng_state(rng_state)
 
     def create_upsampling_branch(self, num_classes: int) -> nn.Module:
+        """Create an upsampling branch for mask generation"""
         bottleneck_upsampler = nn.ConvTranspose2d(
             in_channels=self.embed_dim,
             out_channels=self.bottleneck_dim,
@@ -358,6 +355,7 @@ class MaskModel_SpectralNorm(nn.Module):
             padding=0,
             output_padding=0,
         )
+        
         decoder3_upsampler = nn.Sequential(
             Conv2DBlock(self.bottleneck_dim * 2, self.bottleneck_dim, dropout=self.drop_rate),
             Conv2DBlock(self.bottleneck_dim, self.bottleneck_dim, dropout=self.drop_rate),
@@ -371,6 +369,7 @@ class MaskModel_SpectralNorm(nn.Module):
                 output_padding=0,
             ),
         )
+        
         decoder2_upsampler = nn.Sequential(
             Conv2DBlock(256 * 2, 256, dropout=self.drop_rate),
             Conv2DBlock(256, 256, dropout=self.drop_rate),
@@ -383,6 +382,7 @@ class MaskModel_SpectralNorm(nn.Module):
                 output_padding=0,
             ),
         )
+        
         decoder1_upsampler = nn.Sequential(
             Conv2DBlock(128 * 2, 128, dropout=self.drop_rate),
             Conv2DBlock(128, 128, dropout=self.drop_rate),
@@ -395,6 +395,7 @@ class MaskModel_SpectralNorm(nn.Module):
                 output_padding=0,
             ),
         )
+        
         decoder0_header = nn.Sequential(
             Conv2DBlock(64 * 2, 64, dropout=self.drop_rate),
             Conv2DBlock(64, 64, dropout=self.drop_rate),
@@ -405,20 +406,23 @@ class MaskModel_SpectralNorm(nn.Module):
                 stride=1,
                 padding=0,
             ),
-            
         )
 
         return nn.Sequential(
-            OrderedDict(
-                [
-                    ("bottleneck_upsampler", bottleneck_upsampler),
-                    ("decoder3_upsampler", decoder3_upsampler),
-                    ("decoder2_upsampler", decoder2_upsampler),
-                    ("decoder1_upsampler", decoder1_upsampler),
-                    ("decoder0_header", decoder0_header),
-                ]
-            )
+            OrderedDict([
+                ("bottleneck_upsampler", bottleneck_upsampler),
+                ("decoder3_upsampler", decoder3_upsampler),
+                ("decoder2_upsampler", decoder2_upsampler),
+                ("decoder1_upsampler", decoder1_upsampler),
+                ("decoder0_header", decoder0_header),
+            ])
         )
+    
+    def set_grad_checkpointing(self, enable=True):
+        """Enable or disable gradient checkpointing in the encoder"""
+        if hasattr(self.encoder, 'set_grad_checkpointing'):
+            self.encoder.set_grad_checkpointing(enable)
+            print(f"Gradient checkpointing set to {enable} in MaskModel encoder")
     
     def _forward_upsample(
         self,

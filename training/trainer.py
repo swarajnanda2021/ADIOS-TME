@@ -21,7 +21,7 @@ import json
 import utils
 from models.tme_model import TMEModel
 from models.vision_transformer.modern_vit import VisionTransformer
-from models.vision_transformer.auxiliary_models import TMEHead, MaskModel, ReconstructorModel
+from models.vision_transformer.auxiliary_models import TMEHead, MaskModel_SpectralNorm, ReconstructorModel
 from data.datasets import ADIOSPathologyDataset
 from losses.adios_loss import ADIOSLoss
 
@@ -87,7 +87,7 @@ def train_adios_tme(args):
         num_register_tokens=4,
     )
     
-    mask_model = MaskModel(
+    mask_model = MaskModel_SpectralNorm(
         encoder=mask_encoder,
         num_masks=args.num_masks,
         encoder_dim=192,
@@ -365,10 +365,9 @@ def train_adios_tme(args):
                     
                     reconstructed_test = reconstructor(hybrid_test)
                     recon_error = F.l1_loss(reconstructed_test, original_image)
-                    reconstruction_reward = torch.exp(-recon_error * 5.0)
-                
-                # Combine: adversarial - reward
-                total_mask_loss = mask_loss - reconstruction_reward
+                    
+                # Combine: adversarial 
+                total_mask_loss = mask_loss 
 
             if fp16_scaler is not None:
                 fp16_scaler.scale(total_mask_loss).backward()
