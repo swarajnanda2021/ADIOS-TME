@@ -283,7 +283,8 @@ def train_semantic_grounding(args):
         # ============ Forward pass ============
         
         # Step 1: Extract features with frozen encoder (no masking)
-        features = extract_features(frozen_encoder, images)  # [B, D, 14, 14]
+        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+            features = extract_features(frozen_encoder, images)  # [B, D, 14, 14]
         
         # Step 2: Generate masks
         mask_model.train()

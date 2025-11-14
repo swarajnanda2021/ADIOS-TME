@@ -28,9 +28,9 @@ def get_args_parser():
                         help='Dropout in mask decoder')
     
     # ========== Semantic Grounding ==========
-    parser.add_argument('--checkpoint_path', type=str, required=True,
+    parser.add_argument('--checkpoint_path', type=str, default='',
                         help='Path to pretrained ViT checkpoint')
-    parser.add_argument('--template_path', type=str, required=True,
+    parser.add_argument('--template_path', type=str, default='',
                         help='Path to template feature bank pickle')
     parser.add_argument('--temperature', type=float, default=0.07,
                         help='Temperature for contrastive loss')
