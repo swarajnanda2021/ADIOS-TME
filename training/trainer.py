@@ -388,7 +388,7 @@ def train_adios_tme(args):
             metric_logger.update(mask_total_loss=total_mask_loss.item())
 
         # ============ Visualization ============
-        if iteration % args.viz_freq == 0 and iteration < 5000:
+        if iteration % args.viz_freq == 0:
             sample_image = original_image[:1]
             with torch.no_grad():
                 vis_masks = mask_model(sample_image)['masks']
