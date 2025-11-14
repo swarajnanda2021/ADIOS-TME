@@ -58,11 +58,24 @@ def load_frozen_encoder(checkpoint_path, args):
         else:
             state_dict = checkpoint
         
-        # Remove 'module.' prefix if present
+        # Remove 'module.' prefix if present (from DDP wrapping)
         state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         
+        # Extract backbone weights if checkpoint is from wrapped model (CombinedModel)
+        # Check if keys have 'backbone.' prefix
+        backbone_keys = [k for k in state_dict.keys() if k.startswith('backbone.')]
+        if backbone_keys:
+            print(f"  Detected CombinedModel wrapping: extracting backbone weights ({len(backbone_keys)} keys)")
+            # Keep only backbone keys and remove the prefix
+            state_dict = {k.replace('backbone.', ''): v for k, v in state_dict.items() 
+                         if k.startswith('backbone.')}
+        
         msg = encoder.load_state_dict(state_dict, strict=False)
-        print(f"  Loaded checkpoint with message: {msg}")
+        print(f"  Loaded checkpoint successfully")
+        if msg.missing_keys:
+            print(f"    Missing keys: {len(msg.missing_keys)}")
+        if msg.unexpected_keys:
+            print(f"    Unexpected keys: {len(msg.unexpected_keys)}")
     except FileNotFoundError:
         print(f"  WARNING: Checkpoint not found at {checkpoint_path}")
         print(f"  Using random initialization (placeholder)")
