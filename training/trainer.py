@@ -54,13 +54,6 @@ def load_template_bank(template_path):
 def create_frozen_encoder(checkpoint_path, args):
     """
     Create and freeze ViT encoder from checkpoint.
-    
-    Args:
-        checkpoint_path: Path to pretrained checkpoint
-        args: Training arguments
-        
-    Returns:
-        frozen_encoder: Frozen ViT model
     """
     print(f"Loading frozen encoder from {checkpoint_path}")
     
@@ -87,8 +80,16 @@ def create_frozen_encoder(checkpoint_path, args):
     else:
         state_dict = checkpoint
     
-    # Remove 'module.' prefix if present
+    # Remove 'module.' prefix if present (from DDP wrapping)
     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    
+    # ⭐ ADD THIS BLOCK ⭐
+    # Extract backbone weights if checkpoint is from wrapped model (CombinedModel)
+    backbone_keys = [k for k in state_dict.keys() if k.startswith('backbone.')]
+    if backbone_keys:
+        print(f"  Detected wrapped model: extracting backbone weights ({len(backbone_keys)} keys)")
+        state_dict = {k.replace('backbone.', ''): v for k, v in state_dict.items() 
+                     if k.startswith('backbone.')}
     
     # Load weights (strict=False in case of head mismatches)
     msg = encoder.load_state_dict(state_dict, strict=False)
@@ -104,7 +105,7 @@ def create_frozen_encoder(checkpoint_path, args):
     print("  Encoder frozen and ready")
     
     return encoder
-
+    
 
 def create_mask_model(frozen_encoder, args):
     """
