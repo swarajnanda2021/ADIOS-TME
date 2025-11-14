@@ -204,26 +204,16 @@ class FeatureCorrespondenceLoss(nn.Module):
             background_bank, nuclei_bank
         )
         
-        # Diversity (masks should not overlap)
-        L_diversity = self.diversity_loss(nuclei_mask, background_mask)
-        
-        # Sparsity
-        L_sparsity = self.sparsity_loss(masks)
-        
         # Total loss
         total_loss = (
             L_nuclei +
             L_background +
-            self.diversity_weight * L_diversity +
-            self.sparsity_weight * L_sparsity
         )
         
         # Metrics
         metrics = {
             'nuclei_alignment': L_nuclei.item(),
             'background_alignment': L_background.item(),
-            'diversity': L_diversity.item(),
-            'sparsity': L_sparsity.item(),
         }
         
         return total_loss, metrics

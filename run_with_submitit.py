@@ -136,10 +136,8 @@ def main():
     args.checkpoint_path = "/data1/vanderbc/nandas1/TCGA_TMEDinov3_ViT-B_B2_seqpacking/logs/checkpoint.pth"
     args.template_path = "/data1/vanderbc/nandas1/STEGO-TME/templates/pannuke_features.pkl"
     args.temperature = 0.07
-    args.top_k_patches = 20
-    args.diversity_weight = 0.1
-    args.sparsity_weight = 0.1
-
+    args.top_k_patches = 2048
+    
     # ========== Training ==========
     args.batch_size_per_gpu = 128
     args.total_iterations = 100_000

@@ -36,10 +36,6 @@ def get_args_parser():
                         help='Temperature for contrastive loss')
     parser.add_argument('--top_k_patches', type=int, default=20,
                         help='Number of patches to select per mask')
-    parser.add_argument('--diversity_weight', type=float, default=0.1,
-                        help='Weight for inter-mask diversity')
-    parser.add_argument('--sparsity_weight', type=float, default=0.1,
-                        help='Weight for sparsity regularization')
     
     # ========== Training ==========
     parser.add_argument('--batch_size_per_gpu', default=64, type=int)

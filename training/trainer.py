@@ -205,8 +205,6 @@ def train_semantic_grounding(args):
     correspondence_loss = FeatureCorrespondenceLoss(
         temperature=args.temperature,
         top_k=args.top_k_patches,
-        diversity_weight=args.diversity_weight,
-        sparsity_weight=args.sparsity_weight,
     ).cuda()
     
     # ============ Create optimizer ============
