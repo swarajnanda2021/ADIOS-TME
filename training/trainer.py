@@ -423,9 +423,32 @@ def train_adios_tme(args):
         metric_logger.update(mask_loss=mask_loss.item())
         metric_logger.update(**student_metrics)
         metric_logger.update(**mask_metrics)
-        
-        if iteration % 10 == 0 and utils.is_main_process():
-            print(f"Iteration {iteration}: {metric_logger}")
+
+        if iteration % args.log_freq == 0 and utils.is_main_process():
+            # Calculate ETA
+            elapsed_time = time.time() - metric_logger.start_time
+            iter_time = elapsed_time / max(iteration, 1)
+            remaining_iters = args.total_iterations - iteration
+            eta_seconds = iter_time * remaining_iters
+            eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+            
+            # Format progress
+            space_fmt = len(str(args.total_iterations))
+            progress_str = f"[{iteration:>{space_fmt}}/{args.total_iterations}]"
+            
+            # GPU memory
+            if torch.cuda.is_available():
+                memory_mb = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+                memory_str = f"max mem: {memory_mb:.0f} MB"
+            else:
+                memory_str = ""
+            
+            # Print formatted log
+            print(f"{progress_str}  "
+                f"eta: {eta_string}  "
+                f"{metric_logger}  "
+                f"time: {iter_time:.4f} s/it  "
+                f"{memory_str}")
         
         # ============ Checkpoint ============
         if iteration % args.save_freq == 0:
