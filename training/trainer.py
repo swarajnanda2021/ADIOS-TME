@@ -40,17 +40,19 @@ from .helpers import (
 
 def train_adios_tme(args):
     """
-    Main training function for ADIOS-TME with optimizations.
+    Main training function for ADIOS-TME with optional reconstructor.
     """
     # ============ Setup ============
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
-    print("Starting ADIOS-TME training (OPTIMIZED)")
+    
+    method_name = "ADIOS-TME (with reconstruction)" if args.use_reconstructor else "ADIOS-TME (pure adversarial)"
+    print(f"Starting {method_name}")
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
     # ============ Create models ============
     
-    # Student encoder
+    # Student encoder (always created)
     student_backbone = VisionTransformer(
         img_size=224,
         patch_size=args.patch_size,
@@ -63,7 +65,6 @@ def train_adios_tme(args):
         num_register_tokens=4,
     )
     
-    # TME head
     tme_head = TMEHead(
         in_dim=args.embed_dim,
         hidden_dim=2048,
@@ -71,13 +72,12 @@ def train_adios_tme(args):
         use_bn=False
     )
     
-    # Combined student model
     student = TMEModel(
         backbone=student_backbone,
         tme_head=tme_head
     )
     
-    # Mask model (ViT-Tiny)
+    # Mask model (always created)
     mask_encoder = VisionTransformer(
         img_size=224,
         patch_size=16,
@@ -96,38 +96,50 @@ def train_adios_tme(args):
         drop_rate=0.2
     )
     
-    # Reconstructor (ViT-Tiny)
-    reconstructor_encoder = VisionTransformer(
-        img_size=224,
-        patch_size=16,
-        embed_dim=384,
-        depth=12,
-        num_heads=6,
-        mlp_ratio=4.0,
-        drop_path_rate=0.1,
-        num_register_tokens=4,
-    )
+    # Reconstructor (conditional creation)
+    reconstructor = None
+    reconstructor_optimizer = None
     
-    reconstructor = ReconstructorModel(
-        encoder=reconstructor_encoder,
-        encoder_dim=384,
-        drop_rate=0.2
-    )
+    if args.use_reconstructor:
+        print("Creating reconstructor model (your method)")
+        reconstructor_encoder = VisionTransformer(
+            img_size=224,
+            patch_size=16,
+            embed_dim=384,
+            depth=12,
+            num_heads=6,
+            mlp_ratio=4.0,
+            drop_path_rate=0.1,
+            num_register_tokens=4,
+        )
+        
+        reconstructor = ReconstructorModel(
+            encoder=reconstructor_encoder,
+            encoder_dim=384,
+            drop_rate=0.2
+        )
+        
+        reconstructor = reconstructor.cuda()
+        reconstructor = setup_ddp_model(reconstructor, args, find_unused=False)
+        reconstructor._set_static_graph()
+        
+        reconstructor_optimizer = torch.optim.AdamW(
+            reconstructor.parameters(),
+            lr=args.lr * 0.1,
+            weight_decay=args.weight_decay
+        )
+    else:
+        print("Skipping reconstructor (pure ADIOS method)")
     
-    # Move to GPU
+    # Move to GPU and setup DDP
     student = student.cuda()
     mask_model = mask_model.cuda()
-    reconstructor = reconstructor.cuda()
     
-    # Setup DDP
     student = setup_ddp_model(student, args, find_unused=False)
     mask_model = setup_ddp_model(mask_model, args, find_unused=False)
-    reconstructor = setup_ddp_model(reconstructor, args, find_unused=False)
     
-    # Set static graph for efficiency
     student._set_static_graph()
     mask_model._set_static_graph()
-    reconstructor._set_static_graph()
     
     # ============ Create loss ============
     adios_loss = ADIOSLoss(
@@ -150,12 +162,6 @@ def train_adios_tme(args):
         lr=args.lr * 0.1,
         weight_decay=args.weight_decay
     )
-    
-    reconstructor_optimizer = torch.optim.AdamW(
-        reconstructor.parameters(),
-        lr=args.lr * 0.1,
-        weight_decay=args.weight_decay
-    )
 
     lr_schedule = utils.cosine_scheduler(
         base_value=args.lr,
@@ -167,7 +173,7 @@ def train_adios_tme(args):
     # ============ Setup fp16/bfloat16 scaler ============
     fp16_scaler = None
     use_amp = args.use_fp16
-    amp_dtype = torch.bfloat16  # Use bfloat16 for better stability
+    amp_dtype = torch.bfloat16
     
     if use_amp:
         fp16_scaler = torch.cuda.amp.GradScaler()
@@ -193,16 +199,23 @@ def train_adios_tme(args):
     
     # Resume from checkpoint if exists
     to_restore = {"iteration": 0}
+    restore_dict = {
+        'student': student,
+        'mask_model': mask_model,
+        'student_optimizer': student_optimizer,
+        'mask_optimizer': mask_optimizer,
+        'fp16_scaler': fp16_scaler,
+    }
+    
+    # Add reconstructor to restoration if it exists
+    if args.use_reconstructor:
+        restore_dict['reconstructor'] = reconstructor
+        restore_dict['reconstructor_optimizer'] = reconstructor_optimizer
+    
     utils.restart_from_checkpoint(
         os.path.join(args.output_dir, "checkpoint.pth"),
         run_variables=to_restore,
-        student=student,
-        mask_model=mask_model,
-        reconstructor=reconstructor,
-        student_optimizer=student_optimizer,
-        mask_optimizer=mask_optimizer,
-        reconstructor_optimizer=reconstructor_optimizer,
-        fp16_scaler=fp16_scaler,
+        **restore_dict
     )
     start_iteration = to_restore["iteration"]
 
@@ -211,8 +224,8 @@ def train_adios_tme(args):
     metric_logger = utils.IterationMetricLogger(total_iterations=args.total_iterations)
     
     # Multi-crop configuration
-    crops_per_mask = getattr(args, 'crops_per_mask', 2)  # Default: 2 crops per mask
-    print(f"Using {crops_per_mask} crops per mask for multi-scale training")
+    crops_per_mask = getattr(args, 'crops_per_mask', 0)  # Default to 0 (no crops)
+    print(f"Using {crops_per_mask} crops per mask")
     
     for data in data_loader:
         if iteration >= args.total_iterations:
@@ -226,26 +239,21 @@ def train_adios_tme(args):
         for param_group in student_optimizer.param_groups:
             param_group['lr'] = lr_schedule[iteration]
         
-        # ============ CRITICAL OPTIMIZATION: Cache masks once per iteration ============
-        # This dramatically reduces memory usage by avoiding redundant forward passes
+        # ============ Cache masks once per iteration ============
         mask_model.eval()
         with torch.no_grad():
-            # Generate masks ONCE and cache them
             cached_mask_output = mask_model(original_image)
-            cached_masks = cached_mask_output["masks"].clone()  # Clone to ensure no graph retention
-            
+            cached_masks = cached_mask_output["masks"].clone()
             crop_params = None
         
-        # Clean up the original output to free memory
         del cached_mask_output
         torch.cuda.empty_cache()
 
-        # ============ Phase 1: Train Student (Inpainter) ============
+        # ============ Phase 1: Train Student (ALWAYS) ============
         student.train()
         student_optimizer.zero_grad()
 
         with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-            # Use the efficient cached masks + crops function
             student_loss, student_metrics = process_student_with_cached_masks_and_crops(
                 student=student,
                 cached_masks=cached_masks,
@@ -257,30 +265,23 @@ def train_adios_tme(args):
                 num_masks=args.num_masks
             )
         
-        # Backward with gradient scaling
         if fp16_scaler is not None:
             fp16_scaler.scale(student_loss).backward()
-            
             if args.clip_grad:
                 fp16_scaler.unscale_(student_optimizer)
                 torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-            
             fp16_scaler.step(student_optimizer)
             fp16_scaler.update()
         else:
             student_loss.backward()
-            
             if args.clip_grad:
                 torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-            
             student_optimizer.step()
 
-        # ============ Phase 2 & 3: Update reconstructor and mask model ============
-        mask_loss = torch.tensor(0.0)
-        mask_metrics = {'similarity': 0.0, 'sparsity': 0.0}
+        # ============ Phase 2: Train Reconstructor (CONDITIONAL) ============
+        recon_loss = torch.tensor(0.0).cuda()
         
-        if iteration % args.mask_update_freq == 0:
-            # Phase 2: Train Reconstructor
+        if args.use_reconstructor and iteration % args.reconstructor_update_freq == 0:
             student.eval()
             reconstructor.train()
             reconstructor_optimizer.zero_grad()
@@ -316,10 +317,15 @@ def train_adios_tme(args):
 
             metric_logger.update(recon_loss=recon_loss.item())
             
-            # ============ Phase 3: Update Mask Model ============
+        # ============ Phase 3: Update Mask Model (ALWAYS, with conditional logic) ============
+        mask_loss = torch.tensor(0.0).cuda()
+        mask_metrics = {'similarity': 0.0, 'sparsity': 0.0}
+        
+        if iteration % args.mask_update_freq == 0:
             student.eval()
             mask_model.train()
-            reconstructor.eval()
+            if args.use_reconstructor:
+                reconstructor.eval()
             mask_optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
@@ -339,8 +345,7 @@ def train_adios_tme(args):
                 original_emb = all_embeddings[0]
                 masked_embs = all_embeddings[1:]
                 
-                # Compute adversarial loss (mask tries to maximize contrastive loss)
-                # NOTE: K=0 for mask model training (no crops in adversarial phase)
+                # Compute adversarial loss (always computed)
                 mask_loss, mask_metrics = adios_loss(
                     original_emb,
                     masked_embs,
@@ -348,32 +353,42 @@ def train_adios_tme(args):
                     iteration=iteration,
                     forward_type='mask',
                     num_base_masks=args.num_masks,  
-                    K=0  
+                    K=0  # No crops in mask model training
                 )
                 
-                # Add reconstruction reward
-                with torch.no_grad():
-                    # Use same randomization approach for consistency
-                    test_mask_indices = list(range(args.num_masks))
-                    random.shuffle(test_mask_indices)
+                # CONDITIONAL: Add reconstruction component
+                if args.use_reconstructor:
+                    with torch.no_grad():
+                        # Use randomized mask selection for robustness
+                        test_mask_indices = list(range(args.num_masks))
+                        random.shuffle(test_mask_indices)
+                        
+                        hybrid_test = torch.zeros_like(original_image)
+                        content_mask = fresh_masks[:, test_mask_indices[0]:test_mask_indices[0]+1, :, :]
+                        hybrid_test[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
+                        
+                        if len(test_mask_indices) > 1:
+                            guidance_mask_g = fresh_masks[:, test_mask_indices[1]:test_mask_indices[1]+1, :, :]
+                            hybrid_test[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
+                                                        guidance_mask_g * (1 - content_mask))
+                        if len(test_mask_indices) > 2:
+                            guidance_mask_b = fresh_masks[:, test_mask_indices[2]:test_mask_indices[2]+1, :, :]
+                            hybrid_test[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
+                                                        guidance_mask_b * (1 - content_mask))
+                        
+                        reconstructed_test = reconstructor(hybrid_test)
+                        reconstruction_error = F.l1_loss(reconstructed_test, original_image)
+                        
+                    # Balanced objective: adversarial + sparsity + reconstruction
+                    # mask_loss already contains (-adversarial + sparsity)
+                    # Add reconstruction component
+                    total_mask_loss = mask_loss + args.beta_reconstruction * reconstruction_error
                     
-                    hybrid_test = torch.zeros_like(original_image)
-                    content_mask = fresh_masks[:, test_mask_indices[0]:test_mask_indices[0]+1, :, :]
-                    hybrid_test[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
-                    if len(test_mask_indices) > 1:
-                        guidance_mask_g = fresh_masks[:, test_mask_indices[1]:test_mask_indices[1]+1, :, :]
-                        hybrid_test[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
-                                                    guidance_mask_g * (1 - content_mask))
-                    if len(test_mask_indices) > 2:
-                        guidance_mask_b = fresh_masks[:, test_mask_indices[2]:test_mask_indices[2]+1, :, :]
-                        hybrid_test[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
-                                                    guidance_mask_b * (1 - content_mask))
-                    
-                    reconstructed_test = reconstructor(hybrid_test)
-                    recon_error = F.l1_loss(reconstructed_test, original_image)
-                    
-                # Combine: adversarial 
-                total_mask_loss = mask_loss 
+                    metric_logger.update(mask_recon_error=reconstruction_error.item())
+                else:
+                    # Pure adversarial (YugeTen's method)
+                    # mask_loss already contains (-adversarial + sparsity)
+                    total_mask_loss = mask_loss
 
             if fp16_scaler is not None:
                 fp16_scaler.scale(total_mask_loss).backward()
@@ -391,14 +406,15 @@ def train_adios_tme(args):
             metric_logger.update(mask_adversarial_loss=mask_loss.item())
             metric_logger.update(mask_total_loss=total_mask_loss.item())
 
-        # ============ Visualization ============
+        # ============ Visualization (handle reconstructor conditionally) ============
         if iteration % args.viz_freq == 0:
             sample_image = original_image[:1]
             with torch.no_grad():
                 vis_masks = mask_model(sample_image)['masks']
                 
+                # Only compute reconstructed images if reconstructor exists
                 reconstructed_images = None
-                if reconstructor is not None:
+                if args.use_reconstructor:
                     content_mask = vis_masks[:, 0:1, :, :]
                     hybrid_input = torch.zeros_like(sample_image)
                     hybrid_input[:, 0:1, :, :] = sample_image[:, 0:1, :, :] * content_mask
@@ -410,10 +426,10 @@ def train_adios_tme(args):
                     vis_masks,
                     iteration,
                     os.path.join(args.output_dir, 'visualizations', 'masks'),
-                    reconstructed_images
+                    reconstructed_images  # Will be None if no reconstructor
                 )
 
-        # Clean up cached masks
+        # Clean up
         del cached_masks
         if crop_params is not None:
             del crop_params
@@ -426,43 +442,42 @@ def train_adios_tme(args):
         metric_logger.update(**mask_metrics)
 
         if iteration % args.log_freq == 0 and utils.is_main_process():
-            # Calculate ETA
             elapsed_time = time.time() - metric_logger.start_time
             iter_time = elapsed_time / max(iteration, 1)
             remaining_iters = args.total_iterations - iteration
             eta_seconds = iter_time * remaining_iters
             eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
             
-            # Format progress
             space_fmt = len(str(args.total_iterations))
             progress_str = f"[{iteration:>{space_fmt}}/{args.total_iterations}]"
             
-            # GPU memory
             if torch.cuda.is_available():
                 memory_mb = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
                 memory_str = f"max mem: {memory_mb:.0f} MB"
             else:
                 memory_str = ""
             
-            # Print formatted log
             print(f"{progress_str}  "
-                f"eta: {eta_string}  "
-                f"{metric_logger}  "
-                f"time: {iter_time:.4f} s/it  "
-                f"{memory_str}")
+                  f"eta: {eta_string}  "
+                  f"{metric_logger}  "
+                  f"time: {iter_time:.4f} s/it  "
+                  f"{memory_str}")
         
         # ============ Checkpoint ============
         if iteration % args.save_freq == 0:
             save_dict = {
                 'student': student.state_dict(),
                 'mask_model': mask_model.state_dict(),
-                'reconstructor': reconstructor.state_dict(),
                 'student_optimizer': student_optimizer.state_dict(),
                 'mask_optimizer': mask_optimizer.state_dict(),
-                'reconstructor_optimizer': reconstructor_optimizer.state_dict(),
                 'iteration': iteration,
                 'args': args,
             }
+            
+            # Conditionally add reconstructor to checkpoint
+            if args.use_reconstructor:
+                save_dict['reconstructor'] = reconstructor.state_dict()
+                save_dict['reconstructor_optimizer'] = reconstructor_optimizer.state_dict()
             
             if fp16_scaler is not None:
                 save_dict['fp16_scaler'] = fp16_scaler.state_dict()

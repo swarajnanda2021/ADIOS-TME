@@ -140,6 +140,7 @@ def main():
     args.mask_encoder_depth = 12
     args.mask_update_freq = 5
     args.mask_dropout = 0.2
+    args.crops_per_mask = 0
 
     # ========== ADIOS Loss Configuration ==========
     args.alpha_sparsity = 0.1

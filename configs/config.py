@@ -39,16 +39,24 @@ def get_args_parser():
     # ========== Mask Model ==========
     parser.add_argument('--num_masks', default=3, type=int,
                         help='Number of semantic masks to generate')
-    parser.add_argument('--crops_per_mask', default=2, type=int,
+    parser.add_argument('--crops_per_mask', default=1, type=int,
                         help='Number of random crops per mask for multi-scale training (0 to disable)')
     parser.add_argument('--mask_encoder_dim', default=192, type=int,
                         help='Mask encoder embedding dimension')
     parser.add_argument('--mask_encoder_depth', default=12, type=int,
                         help='Mask encoder depth')
-    parser.add_argument('--mask_update_freq', default=5, type=int,
+    parser.add_argument('--mask_update_freq', default=1, type=int,
                         help='Update mask model every N iterations')
     parser.add_argument('--mask_dropout', default=0.2, type=float,
                         help='Dropout rate in mask decoder')
+    
+    # ========== Reconstructor Model (ADIOS versus Ours) ==========
+    parser.add_argument('--use_reconstructor', action='store_true', default=False,
+                        help='Enable reconstructor model (your method) vs pure ADIOS (YugeTen)')
+    parser.add_argument('--beta_reconstruction', type=float, default=1.0,
+                        help='Weight for reconstruction error in mask model training (only used if use_reconstructor=True)')
+    parser.add_argument('--reconstructor_update_freq', type=int, default=1,
+                        help='How often to update reconstructor (only used if use_reconstructor=True)')
     
     # ========== ADIOS Loss ==========
     parser.add_argument('--alpha_sparsity', default=0.1, type=float,

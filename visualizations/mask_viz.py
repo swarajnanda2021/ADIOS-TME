@@ -37,20 +37,20 @@ def save_iteration_masks_efficient(
     masks, 
     iteration, 
     save_dir, 
-    reconstructed_images=None, 
+    reconstructed_images=None,  # Now properly handles None
     num_samples=4, 
     timeout_seconds=30
 ):
     """
     Efficient, robust mask visualization that prevents hanging.
-    Creates comprehensive visualizations showing original, masks, combined, and reconstructed images.
+    Creates comprehensive visualizations showing original, masks, combined, and optionally reconstructed images.
     
     Args:
         images: Input images tensor [B, C, H, W]
         masks: Generated masks tensor [B, num_masks, H, W] 
         iteration: Current training iteration
         save_dir: Directory to save visualizations
-        reconstructed_images: Pre-computed reconstructed images tensor [B, C, H, W] (optional)
+        reconstructed_images: Optional pre-computed reconstructed images tensor [B, C, H, W] (can be None)
         num_samples: Number of samples to visualize (default: 4)
         timeout_seconds: Maximum time allowed for visualization (default: 30)
     """
@@ -61,8 +61,11 @@ def save_iteration_masks_efficient(
             # Move everything to CPU immediately and convert to float32
             images_cpu = images.detach().cpu().float()
             masks_cpu = masks.detach().cpu().float()
+            
+            # Handle reconstructed images conditionally
             reconstructed_cpu = None
-            if reconstructed_images is not None:
+            has_reconstruction = reconstructed_images is not None
+            if has_reconstruction:
                 reconstructed_cpu = reconstructed_images.detach().cpu().float()
             
             # Clear CUDA cache to prevent memory issues
@@ -77,7 +80,7 @@ def save_iteration_masks_efficient(
                 indices = torch.randperm(batch_size)[:num_samples]
                 images_cpu = images_cpu[indices]
                 masks_cpu = masks_cpu[indices]
-                if reconstructed_cpu is not None:
+                if has_reconstruction:
                     reconstructed_cpu = reconstructed_cpu[indices]
             
             # Denormalization on CPU using pathology-specific values
@@ -89,16 +92,18 @@ def save_iteration_masks_efficient(
             images_norm = torch.clamp(images_norm, 0, 1)
             
             # Unnormalize reconstructed images if available
-            if reconstructed_cpu is not None:
+            reconstructed_norm = None
+            if has_reconstruction:
                 reconstructed_norm = reconstructed_cpu * std_cpu + mean_cpu
                 reconstructed_norm = torch.clamp(reconstructed_norm, 0, 1)
             
             num_masks = masks_cpu.size(1)
             
-            # Create comprehensive visualization
-            # Columns: Original + Individual Masks + RGB Combined + (optional) Reconstructed
-            cols = min(num_masks + 2, 6)  # Original + masks + combined, max 6 cols
-            if reconstructed_cpu is not None:
+            # Determine number of columns
+            # Columns: Original + Individual Masks (up to 3) + RGB Combined + (optional) Reconstructed
+            max_individual_masks = min(num_masks, 3)  # Show at most 3 individual masks
+            cols = 1 + max_individual_masks + 1  # Original + masks + combined
+            if has_reconstruction:
                 cols += 1  # Add column for reconstruction
             
             fig, axes = plt.subplots(num_samples, cols, figsize=(3*cols, 3*num_samples))
@@ -120,9 +125,8 @@ def save_iteration_masks_efficient(
                     axes[i, col_idx].set_title('Original', fontsize=10)
                 col_idx += 1
                 
-                # Columns 2-N: Individual masks (limit to available space)
-                masks_to_show = min(num_masks, cols - 2 - (1 if reconstructed_cpu is not None else 0))
-                for j in range(masks_to_show):
+                # Columns 2-N: Individual masks (show up to 3)
+                for j in range(max_individual_masks):
                     mask_np = masks_cpu[i, j].numpy()
                     axes[i, col_idx].imshow(mask_np, cmap='viridis', vmin=0, vmax=1)
                     axes[i, col_idx].axis('off')
@@ -152,7 +156,7 @@ def save_iteration_masks_efficient(
                 col_idx += 1
                 
                 # Reconstructed image (if available)
-                if reconstructed_cpu is not None:
+                if has_reconstruction:
                     recon_np = reconstructed_norm[i].permute(1, 2, 0).numpy()
                     axes[i, col_idx].imshow(recon_np)
                     axes[i, col_idx].axis('off')
@@ -169,7 +173,7 @@ def save_iteration_masks_efficient(
             
             # Force garbage collection
             del images_cpu, masks_cpu, images_norm
-            if reconstructed_cpu is not None:
+            if has_reconstruction:
                 del reconstructed_cpu, reconstructed_norm
             gc.collect()
             
@@ -188,7 +192,6 @@ def save_iteration_masks_efficient(
             plt.close('all')
         except:
             pass
-
 
 def safe_visualization_wrapper(images, masks, iteration, save_dir, reconstructed_images=None):
     """
