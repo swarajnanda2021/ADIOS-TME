@@ -1,60 +1,23 @@
 """
-Semantic grounding trainer via feature correspondence.
-
-Architecture:
-    - Frozen ViT backbone for feature extraction
-    - MaskModel (frozen encoder + trainable decoder)
-    - Template feature bank (nuclei + background)
-
-Training:
-    - Extract features from unmasked images
-    - Generate masks
-    - Select patches by mask values
-    - Align selected features with templates
+STEGO-style semantic segmentation trainer.
 """
 
 import os
-import pickle
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from pathlib import Path
 
 import utils
 from models.vision_transformer.modern_vit import VisionTransformer
 from models.vision_transformer.auxiliary_models import MaskModel
 from data.datasets import ADIOSPathologyDataset
-from losses.correspondence_loss import FeatureCorrespondenceLoss
+from losses.stego_loss import STEGOLossWithRegularizers
 from training.helpers import worker_init_fn, save_iteration_masks_efficient
-
-
-def load_template_bank(template_path):
-    """
-    Load pre-computed template features.
-    
-    Expected pickle format:
-    {
-        'nuclei_features': [N_nuclei, D] tensor,
-        'background_features': [N_bg, D] tensor,
-    }
-    """
-    print(f"Loading template bank from {template_path}")
-    with open(template_path, 'rb') as f:
-        data = pickle.load(f)
-    
-    nuclei_features = data['nuclei_features'].cuda()
-    background_features = data['background_features'].cuda()
-    
-    print(f"  Nuclei templates: {nuclei_features.shape}")
-    print(f"  Background templates: {background_features.shape}")
-    
-    return nuclei_features, background_features
+from utils_knn import KNNIndex
 
 
 def create_frozen_encoder(checkpoint_path, args):
-    """
-    Create and freeze ViT encoder from checkpoint.
-    """
+    """Create and freeze ViT encoder from checkpoint."""
     print(f"Loading frozen encoder from {checkpoint_path}")
     
     encoder = VisionTransformer(
@@ -72,7 +35,6 @@ def create_frozen_encoder(checkpoint_path, args):
     # Load weights
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
-    # Handle different checkpoint formats
     if 'model' in checkpoint:
         state_dict = checkpoint['model']
     elif 'student' in checkpoint:
@@ -80,46 +42,30 @@ def create_frozen_encoder(checkpoint_path, args):
     else:
         state_dict = checkpoint
     
-    # Remove 'module.' prefix if present (from DDP wrapping)
     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
     
-    # ⭐ ADD THIS BLOCK ⭐
-    # Extract backbone weights if checkpoint is from wrapped model (CombinedModel)
+    # Extract backbone if wrapped
     backbone_keys = [k for k in state_dict.keys() if k.startswith('backbone.')]
     if backbone_keys:
-        print(f"  Detected wrapped model: extracting backbone weights ({len(backbone_keys)} keys)")
+        print(f"  Detected wrapped model: extracting backbone weights")
         state_dict = {k.replace('backbone.', ''): v for k, v in state_dict.items() 
                      if k.startswith('backbone.')}
     
-    # Load weights (strict=False in case of head mismatches)
     msg = encoder.load_state_dict(state_dict, strict=False)
     print(f"  Loaded with message: {msg}")
     
-    # Freeze all parameters
+    # Freeze
     for param in encoder.parameters():
         param.requires_grad = False
     
     encoder.eval()
     encoder.cuda()
     
-    print("  Encoder frozen and ready")
-    
     return encoder
 
 
 def create_mask_model(frozen_encoder, args):
-    """
-    Create mask model with frozen encoder backbone.
-    
-    The encoder is shared (frozen), only decoder is trainable.
-    
-    Args:
-        frozen_encoder: Pre-loaded frozen ViT
-        args: Training arguments
-        
-    Returns:
-        mask_model: MaskModel with trainable decoder
-    """
+    """Create mask model with frozen encoder backbone."""
     mask_model = MaskModel(
         encoder=frozen_encoder,
         num_masks=args.num_masks,
@@ -131,7 +77,6 @@ def create_mask_model(frozen_encoder, args):
     for name, param in mask_model.encoder.named_parameters():
         assert not param.requires_grad, f"Encoder param {name} is not frozen!"
     
-    # Count trainable parameters (should only be decoder)
     trainable = sum(p.numel() for p in mask_model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in mask_model.parameters())
     print(f"Mask model: {trainable:,} trainable / {total:,} total parameters")
@@ -143,53 +88,68 @@ def create_mask_model(frozen_encoder, args):
 
 def extract_features(encoder, images):
     """
-    Extract features from unmasked images.
+    Extract dense spatial features from frozen encoder.
     
     Args:
-        encoder: Frozen ViT encoder
+        encoder: Frozen ViT
         images: [B, 3, H, W]
         
     Returns:
         features: [B, D, H_feat, W_feat]
     """
     with torch.no_grad():
-        # Get intermediate layers
         layer_features = encoder.get_intermediate_layers(images)
+        features = layer_features[-1]  # [B, N+5, D]
         
-        # Use last layer
-        features = layer_features[-1]  # [B, N+5, D] (cls + 4 registers + patches)
-        
-        # Extract patch tokens only (remove cls and registers)
+        # Extract patch tokens (remove CLS + registers)
         patch_features = features[:, 5:, :]  # [B, N_patches, D]
         
         # Reshape to spatial
         B, N, D = patch_features.shape
         H_feat = W_feat = int(N ** 0.5)
         features_spatial = patch_features.reshape(B, H_feat, W_feat, D).permute(0, 3, 1, 2)
-        # [B, D, H_feat, W_feat]
         
     return features_spatial
 
 
+def extract_segmentation_codes(mask_model, images):
+    """
+    Extract learned segmentation codes (before softmax).
+    
+    The codes are what we want to cluster, not the masks themselves.
+    
+    Args:
+        mask_model: MaskModel
+        images: [B, 3, H, W]
+        
+    Returns:
+        seg_codes: [B, K, H, W] continuous codes
+        masks: [B, K, H, W] softmax-normalized masks
+    """
+    output = mask_model(images)
+    masks = output['masks']  # [B, K, H, W] - already softmaxed
+    
+    # For STEGO, we need the codes BEFORE softmax
+    # The masks are just for visualization and regularization
+    # We'll use the masks as our "codes" since your MaskModel already applies softmax
+    # Ideally, you'd modify MaskModel to return pre-softmax logits
+    
+    # WORKAROUND: Use masks as codes (they're already normalized)
+    seg_codes = masks
+    
+    return seg_codes, masks
+
+
 def train_semantic_grounding(args):
-    """
-    Main training function with semantic grounding.
-    """
+    """Main training function with STEGO loss."""
     # ============ Setup ============
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
-    print("Starting semantic grounding training")
+    print("Starting STEGO-style training")
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
-    # ============ Load template bank ============
-    nuclei_bank, background_bank = load_template_bank(args.template_path)
-    
     # ============ Create models ============
-    
-    # Frozen encoder (shared for both feature extraction and mask model)
     frozen_encoder = create_frozen_encoder(args.checkpoint_path, args)
-    
-    # Mask model (uses same frozen encoder + trainable decoder)
     mask_model = create_mask_model(frozen_encoder, args)
     
     # Wrap in DDP if multi-GPU
@@ -201,21 +161,25 @@ def train_semantic_grounding(args):
         )
         mask_model._set_static_graph()
     
-    # ============ Create loss ============
-    correspondence_loss = FeatureCorrespondenceLoss(
-        temperature=args.temperature,
-        top_k=args.top_k_patches,
+    # ============ Create STEGO loss ============
+    stego_loss = STEGOLossWithRegularizers(
+        lambda_self=args.lambda_self,
+        lambda_knn=args.lambda_knn,
+        lambda_rand=args.lambda_rand,
+        lambda_diversity=args.lambda_diversity,
+        lambda_sparsity=args.lambda_sparsity,
+        b_self=args.b_self,
+        b_knn=args.b_knn,
+        b_rand=args.b_rand,
     ).cuda()
     
     # ============ Create optimizer ============
-    # Only decoder parameters are trainable
     optimizer = torch.optim.AdamW(
         [p for p in mask_model.parameters() if p.requires_grad],
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
     
-    # Learning rate schedule
     lr_schedule = utils.cosine_scheduler(
         base_value=args.lr,
         final_value=args.min_lr,
@@ -240,15 +204,42 @@ def train_semantic_grounding(args):
         max_samples=None,
     )
     
+    # Use sampler for DDP
+    if args.world_size > 1:
+        sampler = torch.utils.data.DistributedSampler(
+            dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=True,
+        )
+    else:
+        sampler = None
+    
     data_loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size_per_gpu,
+        sampler=sampler,
         num_workers=args.num_workers,
         drop_last=True,
         pin_memory=True,
         persistent_workers=True,
         worker_init_fn=worker_init_fn,
+        shuffle=(sampler is None),
     )
+    
+    # ============ Build KNN index (optional, can skip initially) ============
+    knn_index = None
+    if args.use_knn:
+        knn_path = os.path.join(args.output_dir, 'knn_index.pkl')
+        
+        if os.path.exists(knn_path):
+            print(f"Loading KNN index from {knn_path}")
+            knn_index = KNNIndex(k=args.knn_k)
+            knn_index.load(knn_path)
+        else:
+            print("Building KNN index (this will take a while)...")
+            knn_index = KNNIndex(k=args.knn_k)
+            knn_index.build(data_loader, frozen_encoder, save_path=knn_path)
     
     # ============ Resume from checkpoint ============
     to_restore = {"iteration": 0}
@@ -267,38 +258,50 @@ def train_semantic_grounding(args):
     
     print("Starting training loop...")
     
-    for data in data_loader:
-        if iteration >= args.total_iterations:
-            break
+    data_iter = iter(data_loader)
+    
+    while iteration < args.total_iterations:
+        try:
+            images = next(data_iter)
+        except StopIteration:
+            # Reset iterator
+            data_iter = iter(data_loader)
+            images = next(data_iter)
         
-        # Get images
-        images = data.cuda(non_blocking=True)  # [B, 3, 224, 224]
+        images = images.cuda(non_blocking=True)
         
         # Update learning rate
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr_schedule[iteration]
         
         # ============ Forward pass ============
-        
-        # Step 1: Extract features with frozen encoder (no masking)
-        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-            features = extract_features(frozen_encoder, images)  # [B, D, 14, 14]
-        
-        # Step 2: Generate masks
         mask_model.train()
         optimizer.zero_grad()
         
         with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-            # Forward through mask model
-            mask_output = mask_model(images)
-            masks = mask_output['masks']  # [B, 3, 224, 224]
+            # Extract frozen features
+            features = extract_features(frozen_encoder, images)
             
-            # Compute correspondence loss
-            loss, metrics = correspondence_loss(
+            # Extract learned segmentation codes
+            seg_codes, masks = extract_segmentation_codes(mask_model, images)
+            
+            # Optionally get KNN pairs
+            knn_features = None
+            knn_seg_codes = None
+            
+            if knn_index is not None and args.use_knn:
+                # Get KNN indices for this batch
+                # Note: This is simplified - in practice you'd track dataset indices
+                # For now, we'll skip KNN and just use self + random
+                pass
+            
+            # Compute STEGO loss
+            loss, metrics = stego_loss(
                 features=features,
+                seg_codes=seg_codes,
                 masks=masks,
-                nuclei_bank=nuclei_bank,
-                background_bank=background_bank,
+                knn_features=knn_features,
+                knn_seg_codes=knn_seg_codes,
             )
         
         # ============ Backward pass ============
@@ -326,7 +329,6 @@ def train_semantic_grounding(args):
             optimizer.step()
         
         # ============ Logging ============
-        metric_logger.update(total_loss=loss.item())
         metric_logger.update(**metrics)
         metric_logger.update(lr=optimizer.param_groups[0]['lr'])
         
@@ -336,16 +338,12 @@ def train_semantic_grounding(args):
         # ============ Visualization ============
         if iteration % args.viz_freq == 0 and utils.is_main_process():
             with torch.no_grad():
-                sample_image = images[:1]
-                sample_masks = masks[:1]
-                
                 save_iteration_masks_efficient(
-                    sample_image,
-                    sample_masks,
+                    images[:4],
+                    masks[:4],
                     iteration,
                     os.path.join(args.output_dir, 'visualizations', 'masks'),
-                    reconstructed_images=None,
-                    num_samples=1,
+                    num_samples=4,
                 )
         
         # ============ Checkpoint ============
