@@ -13,10 +13,6 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
     
-    # Set ADIOS-specific defaults
-    args.num_masks = 3
-    args.mask_update_freq = 5
-    
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
     # Use ADIOS trainer
