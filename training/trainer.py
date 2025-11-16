@@ -108,7 +108,7 @@ def train_adios_tme(args):
     
     reconstructor = ReconstructorModel(
         encoder=reconstructor_encoder,
-        encoder_dim=192,
+        encoder_dim=384,
         drop_rate=0.2
     )
     
