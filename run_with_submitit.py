@@ -147,7 +147,7 @@ def main():
     args.reconstructor_encoder_dim = args.mask_encoder_dim
     args.reconstructor_encoder_depth = args.mask_encoder_depth
     args.beta_reconstruction = 1.0
-    arg.reconstructor_update_freq = 1
+    args.reconstructor_update_freq = 1
 
     # ========== ADIOS Loss Configuration ==========
     args.alpha_sparsity = 0.1
