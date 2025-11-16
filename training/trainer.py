@@ -258,7 +258,6 @@ def train_adios_tme(args):
                 original_image=original_image,
                 crop_params=crop_params,
                 K=crops_per_mask,
-                current_iteration=iteration,
                 adios_loss=adios_loss,
                 num_masks=args.num_masks
             )
@@ -348,10 +347,9 @@ def train_adios_tme(args):
                     original_emb,
                     masked_embs,
                     masks=fresh_masks,
-                    iteration=iteration,
                     forward_type='mask',
                     num_base_masks=args.num_masks,  
-                    K=0  # No crops in mask model training
+                    K=args.crops_per_mask
                 )
                 
                 # CONDITIONAL: Add reconstruction component
