@@ -98,9 +98,9 @@ def train_adios_tme(args):
     reconstructor_encoder = VisionTransformer(
         img_size=224,
         patch_size=16,
-        embed_dim=192,
+        embed_dim=384,
         depth=12,
-        num_heads=3,
+        num_heads=6,
         mlp_ratio=4.0,
         drop_path_rate=0.1,
         num_register_tokens=4,
@@ -345,21 +345,25 @@ def train_adios_tme(args):
                     masks=fresh_masks,
                     iteration=iteration,
                     forward_type='mask',
-                    num_base_masks=args.num_masks,  # ✅ Pass this
-                    K=0  # ✅ No crops for mask model training
+                    num_base_masks=args.num_masks,  
+                    K=0  
                 )
                 
                 # Add reconstruction reward
                 with torch.no_grad():
+                    # Use same randomization approach for consistency
+                    test_mask_indices = list(range(args.num_masks))
+                    random.shuffle(test_mask_indices)
+                    
                     hybrid_test = torch.zeros_like(original_image)
-                    content_mask = fresh_masks[:, 0:1, :, :]
+                    content_mask = fresh_masks[:, test_mask_indices[0]:test_mask_indices[0]+1, :, :]
                     hybrid_test[:, 0:1, :, :] = original_image[:, 0:1, :, :] * content_mask
-                    if fresh_masks.shape[1] > 1:
-                        guidance_mask_g = fresh_masks[:, 1:2, :, :]
+                    if len(test_mask_indices) > 1:
+                        guidance_mask_g = fresh_masks[:, test_mask_indices[1]:test_mask_indices[1]+1, :, :]
                         hybrid_test[:, 1:2, :, :] = (original_image[:, 1:2, :, :] * content_mask +
                                                     guidance_mask_g * (1 - content_mask))
-                    if fresh_masks.shape[1] > 2:
-                        guidance_mask_b = fresh_masks[:, 2:3, :, :]
+                    if len(test_mask_indices) > 2:
+                        guidance_mask_b = fresh_masks[:, test_mask_indices[2]:test_mask_indices[2]+1, :, :]
                         hybrid_test[:, 2:3, :, :] = (original_image[:, 2:3, :, :] * content_mask +
                                                     guidance_mask_b * (1 - content_mask))
                     

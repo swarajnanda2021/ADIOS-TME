@@ -196,9 +196,9 @@ class MaskModel_SpectralNorm(nn.Module):
         self.encoder = encoder
         self.num_masks = num_masks
         
-        # Freeze encoder
-        for parameter in self.encoder.parameters():
-            parameter.requires_grad = False
+        # # Freeze encoder
+        # for parameter in self.encoder.parameters():
+        #     parameter.requires_grad = False
             
         self.embed_dim = encoder_dim
         self.drop_rate = drop_rate
