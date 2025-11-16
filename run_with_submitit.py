@@ -28,7 +28,7 @@ def parse_args():
                         help="Number of nodes")
     parser.add_argument("--timeout", default=10000, type=int, 
                         help="Job duration in minutes")
-    parser.add_argument("--partition", default="gpu", type=str, 
+    parser.add_argument("--partition", default="vanderbc_gpu", type=str, 
                         help="Partition name")
     parser.add_argument("--constraint", default="h100", type=str,
                         help="GPU constraint (a100, h100, etc)")
@@ -40,7 +40,7 @@ def get_shared_folder() -> Path:
     """Get shared folder for logs and checkpoints."""
     user = os.environ.get('USER', 'user')
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    p = Path(f"/data1/vanderbc/{user}/adios_tme_runs/run_{timestamp}")
+    p = Path(f"/data1/vanderbc/nandas1/ADIOS-TME/logs")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -136,11 +136,18 @@ def main():
 
     # ========== Mask Model Configuration ==========
     args.num_masks = 3
-    args.mask_encoder_dim = 192
+    args.mask_encoder_dim = 384
     args.mask_encoder_depth = 12
     args.mask_update_freq = 5
     args.mask_dropout = 0.2
     args.crops_per_mask = 0
+
+    # ========== Reconstructor Model Configuration ==========
+    args.use_reconstructor = True
+    args.reconstructor_encoder_dim = args.mask_encoder_dim
+    args.reconstructor_encoder_depth = args.mask_encoder_depth
+    args.beta_reconstruction = 1.0
+    arg.reconstructor_update_freq = 1
 
     # ========== ADIOS Loss Configuration ==========
     args.alpha_sparsity = 0.1
@@ -149,7 +156,7 @@ def main():
     args.reconstruction_weight = 0.1
 
     # ========== Training Configuration ==========
-    args.batch_size_per_gpu = 64
+    args.batch_size_per_gpu = 128
     args.total_iterations = 300_000
     args.warmup_iterations = 10_000
     args.lr = 5e-5

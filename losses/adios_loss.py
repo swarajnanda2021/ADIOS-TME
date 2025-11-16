@@ -41,32 +41,17 @@ class ADIOSLoss(nn.Module):
     Args:
         alpha_sparsity: Weight for sparsity penalty
         img_size: Image size for computing sparsity
-        initial_temp: Initial temperature
-        final_temp: Final temperature
-        total_iters: Total training iterations
     """
     def __init__(
         self, 
         alpha_sparsity=0.1, 
         img_size=224,
-        initial_temp=0.2, 
-        final_temp=0.05, 
         total_iters=300000
     ):
         super().__init__()
         self.alpha_sparsity = alpha_sparsity
         self.img_size = img_size
-        self.initial_temp = initial_temp
-        self.final_temp = final_temp
         self.total_iters = total_iters
-
-    def get_temperature(self, iteration):
-        """Cosine temperature schedule."""
-        if iteration >= self.total_iters:
-            return self.final_temp
-        progress = iteration / self.total_iters
-        return self.final_temp + 0.5 * (self.initial_temp - self.final_temp) * \
-            (1 + math.cos(math.pi * progress))
 
     def multi_mask_contrastive_loss_with_crops(
         self, 
@@ -205,7 +190,7 @@ class ADIOSLoss(nn.Module):
             penalty += (torch.sinh(torch.abs(centered_x) * math.pi) ** 2).mean()
         return penalty / masks.shape[1]
 
-    def forward(self, original_emb, masked_embs, masks=None, iteration=0, 
+    def forward(self, original_emb, masked_embs, masks=None,
                 forward_type='student', num_base_masks=3, K=0):
         """
         Forward pass with support for multi-crop.
@@ -214,7 +199,6 @@ class ADIOSLoss(nn.Module):
             original_emb: Original embeddings [B, D]
             masked_embs: List of masked embeddings (full + crops)
             masks: Mask tensors (only needed for 'mask' forward type)
-            iteration: Current iteration (for temperature schedule)
             forward_type: 'student' or 'mask'
             num_base_masks: Number of base masks (default: 3)
             K: Number of crops per mask (default: 0)
@@ -223,7 +207,7 @@ class ADIOSLoss(nn.Module):
             loss: Total loss value
             metrics: Dictionary of metrics
         """
-        temperature = self.get_temperature(iteration)
+        temperature = 0.1
         
         # Use multi-crop aware loss
         contrastive = self.multi_mask_contrastive_loss_with_crops(
@@ -236,7 +220,6 @@ class ADIOSLoss(nn.Module):
         
         metrics = {
             'similarity': contrastive.item(),
-            'temperature': temperature
         }
         
         total_loss = contrastive

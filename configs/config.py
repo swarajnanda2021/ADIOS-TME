@@ -53,6 +53,10 @@ def get_args_parser():
     # ========== Reconstructor Model (ADIOS versus Ours) ==========
     parser.add_argument('--use_reconstructor', action='store_true', default=False,
                         help='Enable reconstructor model (your method) vs pure ADIOS (YugeTen)')
+    parser.add_argument('--reconstructor_encoder_dim', default=192, type=int,
+                        help='Reconstructor encoder embedding dimension')
+    parser.add_argument('--reconstructor_encoder_depth', default=12, type=int,
+                        help='Reconstructor encoder depth')
     parser.add_argument('--beta_reconstruction', type=float, default=1.0,
                         help='Weight for reconstruction error in mask model training (only used if use_reconstructor=True)')
     parser.add_argument('--reconstructor_update_freq', type=int, default=1,

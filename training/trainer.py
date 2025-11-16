@@ -67,8 +67,8 @@ def train_adios_tme(args):
     
     tme_head = TMEHead(
         in_dim=args.embed_dim,
-        hidden_dim=2048,
-        bottleneck_dim=256,
+        hidden_dim=args.tme_hidden_dim,
+        bottleneck_dim=args.tme_output_dim,
         use_bn=False
     )
     
@@ -77,13 +77,13 @@ def train_adios_tme(args):
         tme_head=tme_head
     )
     
-    # Mask model (always created)
+    # Mask model
     mask_encoder = VisionTransformer(
         img_size=224,
         patch_size=16,
-        embed_dim=192,
-        depth=12,
-        num_heads=3,
+        embed_dim=args.mask_encoder_dim,
+        depth=args.mask_encoder_depth,
+        num_heads=args.mask_encoder_dim // 64,
         mlp_ratio=4.0,
         drop_path_rate=0.1,
         num_register_tokens=4,
@@ -92,7 +92,7 @@ def train_adios_tme(args):
     mask_model = MaskModel_SpectralNorm(
         encoder=mask_encoder,
         num_masks=args.num_masks,
-        encoder_dim=192,
+        encoder_dim=args.mask_encoder_dim,
         drop_rate=0.2
     )
     
@@ -101,13 +101,13 @@ def train_adios_tme(args):
     reconstructor_optimizer = None
     
     if args.use_reconstructor:
-        print("Creating reconstructor model (your method)")
+        print("Creating reconstructor model")
         reconstructor_encoder = VisionTransformer(
             img_size=224,
             patch_size=16,
-            embed_dim=384,
-            depth=12,
-            num_heads=6,
+            embed_dim=args.reconstructor_encoder_dim,
+            depth=args.reconstructor_encoder_depth,
+            num_heads=args.reconstructor_encoder_dim // 64,
             mlp_ratio=4.0,
             drop_path_rate=0.1,
             num_register_tokens=4,
@@ -115,7 +115,7 @@ def train_adios_tme(args):
         
         reconstructor = ReconstructorModel(
             encoder=reconstructor_encoder,
-            encoder_dim=384,
+            encoder_dim=args.reconstructor_encoder_dim,
             drop_rate=0.2
         )
         
@@ -125,7 +125,7 @@ def train_adios_tme(args):
         
         reconstructor_optimizer = torch.optim.AdamW(
             reconstructor.parameters(),
-            lr=args.lr * 0.1,
+            lr=args.lr * 0.25, # Adopting YugeTen's original 1:4 learning rate
             weight_decay=args.weight_decay
         )
     else:
@@ -145,8 +145,6 @@ def train_adios_tme(args):
     adios_loss = ADIOSLoss(
         alpha_sparsity=0.1,
         img_size=224,
-        initial_temp=0.2,
-        final_temp=0.05,
         total_iters=args.total_iterations,
     ).cuda()
     
@@ -159,7 +157,7 @@ def train_adios_tme(args):
     
     mask_optimizer = torch.optim.AdamW(
         mask_model.parameters(),
-        lr=args.lr * 0.1,
+        lr=args.lr * 0.25, # Adopting YugeTen's original 1:4 learning rate
         weight_decay=args.weight_decay
     )
 
