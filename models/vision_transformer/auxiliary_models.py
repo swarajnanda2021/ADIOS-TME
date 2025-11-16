@@ -489,19 +489,18 @@ class MaskModel_SpectralNorm(nn.Module):
         self.check_tensor_for_nan(images, "input images")
         self.check_weights_for_nan()
 
-        with torch.no_grad():
-            # Get features from encoder
-            features = self.encoder.get_intermediate_layers(images)
-            f1, f2, f3, f4 = features
-            
-            # Reshape features
-            num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
-            feature_size = int(np.sqrt(num_patches))
-            
-            f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
-            f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
-            f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
-            f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
+        # Get features from encoder
+        features = self.encoder.get_intermediate_layers(images)
+        f1, f2, f3, f4 = features
+        
+        # Reshape features
+        num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
+        feature_size = int(np.sqrt(num_patches))
+        
+        f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
+        f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
+        f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
+        f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
         
         
         
@@ -923,19 +922,18 @@ class MaskModel(nn.Module):
         self.check_tensor_for_nan(images, "input images")
         self.check_weights_for_nan()
 
-        with torch.no_grad():
-            # Get features from encoder
-            features = self.encoder.get_intermediate_layers(images)
-            f1, f2, f3, f4 = features
+        # Get features from encoder
+        features = self.encoder.get_intermediate_layers(images)
+        f1, f2, f3, f4 = features
 
-            # Reshape features
-            num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
-            feature_size = int(np.sqrt(num_patches))
+        # Reshape features
+        num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
+        feature_size = int(np.sqrt(num_patches))
 
-            f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
-            f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
-            f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
-            f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
+        f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
+        f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
+        f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
+        f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
 
 
         # Single forward pass
