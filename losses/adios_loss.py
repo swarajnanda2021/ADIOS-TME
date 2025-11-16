@@ -46,13 +46,11 @@ class ADIOSLoss(nn.Module):
         self, 
         alpha_sparsity=0.1, 
         img_size=224,
-        total_iters=300000
     ):
         super().__init__()
         self.alpha_sparsity = alpha_sparsity
         self.img_size = img_size
-        self.total_iters = total_iters
-
+        
     def multi_mask_contrastive_loss_with_crops(
         self, 
         masked_embeddings, 

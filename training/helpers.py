@@ -468,7 +468,6 @@ def process_student_with_cached_masks_and_crops(
     original_image, 
     crop_params,  # Not used in batched version
     K, 
-    current_iteration,
     adios_loss, 
     num_masks=3
 ):
@@ -488,7 +487,6 @@ def process_student_with_cached_masks_and_crops(
         original_image: Original images [B, C, H, W]
         crop_params: Not used (kept for API compatibility)
         K: Number of crops per mask
-        current_iteration: Current training iteration
         adios_loss: Loss function
         num_masks: Number of masks (default: 3)
     
@@ -547,7 +545,6 @@ def process_student_with_cached_masks_and_crops(
         orig_emb,
         all_masked_embeddings,
         masks=None,
-        iteration=current_iteration,
         forward_type='student',
         num_base_masks=num_masks,
         K=K

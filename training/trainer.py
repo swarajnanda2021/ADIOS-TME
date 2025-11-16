@@ -145,7 +145,6 @@ def train_adios_tme(args):
     adios_loss = ADIOSLoss(
         alpha_sparsity=0.1,
         img_size=224,
-        total_iters=args.total_iterations,
     ).cuda()
     
     # ============ Create optimizers ============
