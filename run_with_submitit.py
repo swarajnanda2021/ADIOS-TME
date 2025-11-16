@@ -125,7 +125,7 @@ def main():
     args.arch = 'vit_base'
     args.patch_size = 16
     args.embed_dim = 768
-    args.num_heads = 12
+    args.num_heads = 12 # please make heads * 64 = 768, good for Fast Attention methods
     args.depth = 12
     args.mlp_ratio = 4.0
 
@@ -138,7 +138,7 @@ def main():
     args.num_masks = 3
     args.mask_encoder_dim = 384
     args.mask_encoder_depth = 12
-    args.mask_update_freq = 5
+    args.mask_update_freq = 1
     args.mask_dropout = 0.2
     args.crops_per_mask = 0
 
