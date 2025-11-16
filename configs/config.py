@@ -63,6 +63,9 @@ def get_args_parser():
                         help='How often to update reconstructor (only used if use_reconstructor=True)')
     
     # ========== ADIOS Loss ==========
+    parser.add_argument('--sparsity_penalty_type', type=str, default='inverse_sin',
+                    choices=['inverse_sin', 'sinh_squared'],
+                    help='Type of sparsity penalty: inverse_sin (YugeTen) or sinh_squared (yours)')
     parser.add_argument('--alpha_sparsity', default=0.1, type=float,
                         help='Weight for sparsity penalty on masks')
     parser.add_argument('--initial_temp', default=0.2, type=float,

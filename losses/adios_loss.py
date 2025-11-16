@@ -1,11 +1,5 @@
 """
-COMPLETE ADIOS Loss Implementation with Multi-Crop Support
-Replace your entire ADIOSLoss class in losses/adios_loss.py with this version.
-
-This properly handles:
-1. Distributed training with GatherLayer
-2. Multi-crop (full masks + crops)
-3. Proper indexing for multi-GPU
+COMPLETE ADIOS Loss Implementation with Multi-Crop Support and Configurable Sparsity Penalties
 """
 
 import math
@@ -35,27 +29,37 @@ class GatherLayer(torch.autograd.Function):
 
 class ADIOSLoss(nn.Module):
     """
-    ADIOS loss with contrastive learning and sparsity regularization.
+    ADIOS loss with contrastive learning and configurable sparsity regularization.
     Supports multi-crop and distributed training.
     
     Args:
         alpha_sparsity: Weight for sparsity penalty
         img_size: Image size for computing sparsity
+        temperature: Temperature for contrastive loss (fixed, no schedule)
+        sparsity_penalty_type: Type of sparsity penalty ('inverse_sin' or 'sinh_squared')
     """
     def __init__(
         self, 
         alpha_sparsity=0.1, 
         img_size=224,
+        temperature=0.1,
+        sparsity_penalty_type='inverse_sin'
     ):
         super().__init__()
         self.alpha_sparsity = alpha_sparsity
         self.img_size = img_size
+        self.temperature = temperature
+        self.sparsity_penalty_type = sparsity_penalty_type
         
+        print(f"ADIOSLoss initialized with:")
+        print(f"  - Temperature: {self.temperature} (fixed)")
+        print(f"  - Sparsity penalty: {self.sparsity_penalty_type}")
+        print(f"  - Alpha sparsity: {self.alpha_sparsity}")
+
     def multi_mask_contrastive_loss_with_crops(
         self, 
         masked_embeddings, 
         original_embeddings, 
-        temperature, 
         num_base_masks=3, 
         K=0
     ):
@@ -66,7 +70,6 @@ class ADIOSLoss(nn.Module):
             masked_embeddings: List of embeddings [mask1_full, ..., mask3_full, 
                                                    mask1_crop1, ..., mask3_cropK]
             original_embeddings: Original image embeddings [B, D]
-            temperature: Temperature for softmax
             num_base_masks: Number of base masks (3 in your case)
             K: Number of crops per mask (0 if no crops)
         """
@@ -84,7 +87,6 @@ class ADIOSLoss(nn.Module):
         if actual_views != expected_views:
             print(f"WARNING: Expected {expected_views} masked views but got {actual_views}")
             print(f"  num_base_masks={num_base_masks}, K={K}")
-            # Adjust to actual
             total_masked = actual_views
         
         # Normalize all embeddings
@@ -121,7 +123,7 @@ class ADIOSLoss(nn.Module):
                 # Full mask indices
                 for m in range(num_full_masks):
                     mask_idx = gpu_offset + batch_size * (1 + m) + i
-                    if mask_idx < total_size:  # Safety check
+                    if mask_idx < total_size:
                         positive_mask[orig_idx, mask_idx] = 1.0
                         positive_mask[mask_idx, orig_idx] = 1.0
                 
@@ -130,7 +132,7 @@ class ADIOSLoss(nn.Module):
                     for m in range(num_base_masks):
                         for k in range(K):
                             crop_idx = gpu_offset + batch_size * (1 + num_full_masks + m * K + k) + i
-                            if crop_idx < total_size:  # Safety check
+                            if crop_idx < total_size:
                                 positive_mask[orig_idx, crop_idx] = 1.0
                                 positive_mask[crop_idx, orig_idx] = 1.0
                     
@@ -143,8 +145,8 @@ class ADIOSLoss(nn.Module):
                                 positive_mask[full_mask_idx, crop_idx] = 1.0
                                 positive_mask[crop_idx, full_mask_idx] = 1.0
         
-        # Compute similarity matrix
-        sim_matrix = torch.matmul(all_embeddings_gathered, all_embeddings_gathered.T) / temperature
+        # Compute similarity matrix with fixed temperature
+        sim_matrix = torch.matmul(all_embeddings_gathered, all_embeddings_gathered.T) / self.temperature
         
         # Numerical stability
         sim_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
@@ -175,20 +177,65 @@ class ADIOSLoss(nn.Module):
         
         return -original_rows.mean()
 
-    def sparsity_penalty(self, masks):
+    def sparsity_penalty_inverse_sin(self, masks):
         """
-        Encourage masks to have ~50% activation.
-        Using sinh² for smooth gradients.
+        YugeTen's sparsity penalty: 1 / sin(activation * π)
+        
+        Encourages masks to have ~50% activation.
+        Very steep penalty near 0 and 1, gentle near 0.5.
+        
+        Args:
+            masks: [B, num_masks, H, W]
         """
         penalty = 0
         for i in range(masks.shape[1]):
             h, w = masks[:, i].shape[-2:]
             mean_activation = masks[:, i].sum(dim=(-1, -2)) / (h * w)
-            centered_x = mean_activation - 0.5
-            penalty += (torch.sinh(torch.abs(centered_x) * math.pi) ** 2).mean()
+            
+            # Add small epsilon to prevent division by zero
+            sin_term = torch.sin(mean_activation * math.pi) + 1e-10
+            penalty += (1 / sin_term).mean()
+        
         return penalty / masks.shape[1]
 
-    def forward(self, original_emb, masked_embs, masks=None,
+    def sparsity_penalty_sinh_squared(self, masks):
+        """
+        Your sparsity penalty: sinh²(|activation - 0.5| * π)
+        
+        Encourages masks to have ~50% activation.
+        Smoother near 0.5, explodes at extremes.
+        
+        Args:
+            masks: [B, num_masks, H, W]
+        """
+        penalty = 0
+        for i in range(masks.shape[1]):
+            h, w = masks[:, i].shape[-2:]
+            mean_activation = masks[:, i].sum(dim=(-1, -2)) / (h * w)
+            
+            centered_x = mean_activation - 0.5
+            penalty += (torch.sinh(torch.abs(centered_x) * math.pi) ** 2).mean()
+        
+        return penalty / masks.shape[1]
+
+    def sparsity_penalty(self, masks):
+        """
+        Compute sparsity penalty based on configured type.
+        
+        Args:
+            masks: [B, num_masks, H, W]
+        
+        Returns:
+            Sparsity penalty scalar
+        """
+        if self.sparsity_penalty_type == 'inverse_sin':
+            return self.sparsity_penalty_inverse_sin(masks)
+        elif self.sparsity_penalty_type == 'sinh_squared':
+            return self.sparsity_penalty_sinh_squared(masks)
+        else:
+            raise ValueError(f"Unknown sparsity penalty type: {self.sparsity_penalty_type}")
+
+    def forward(self, original_emb, masked_embs, masks=None, iteration=0, 
                 forward_type='student', num_base_masks=3, K=0):
         """
         Forward pass with support for multi-crop.
@@ -197,6 +244,7 @@ class ADIOSLoss(nn.Module):
             original_emb: Original embeddings [B, D]
             masked_embs: List of masked embeddings (full + crops)
             masks: Mask tensors (only needed for 'mask' forward type)
+            iteration: Current iteration (kept for API compatibility, not used)
             forward_type: 'student' or 'mask'
             num_base_masks: Number of base masks (default: 3)
             K: Number of crops per mask (default: 0)
@@ -205,19 +253,17 @@ class ADIOSLoss(nn.Module):
             loss: Total loss value
             metrics: Dictionary of metrics
         """
-        temperature = 0.1
-        
-        # Use multi-crop aware loss
+        # Use fixed temperature (no schedule)
         contrastive = self.multi_mask_contrastive_loss_with_crops(
             masked_embs, 
-            original_emb, 
-            temperature,
+            original_emb,
             num_base_masks=num_base_masks,
             K=K
         )
         
         metrics = {
             'similarity': contrastive.item(),
+            'temperature': self.temperature
         }
         
         total_loss = contrastive
@@ -225,7 +271,7 @@ class ADIOSLoss(nn.Module):
         # Add sparsity penalty only for mask model training
         if forward_type == 'mask' and masks is not None:
             sparsity = self.sparsity_penalty(masks)
-            # Mask model: maximize contrastive loss (adversarial) + sparsity
+            # Mask model: maximize contrastive loss (adversarial) + sparsity penalty
             total_loss = -contrastive + self.alpha_sparsity * sparsity
             metrics['sparsity'] = sparsity.item()
             metrics['adversarial_loss'] = (-contrastive).item()

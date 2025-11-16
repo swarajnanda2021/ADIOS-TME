@@ -141,6 +141,7 @@ def main():
     args.mask_update_freq = 1
     args.mask_dropout = 0.2
     args.crops_per_mask = 0
+    args.sparsity_penalty_type = 'sinh_squared'
 
     # ========== Reconstructor Model Configuration ==========
     args.use_reconstructor = True
