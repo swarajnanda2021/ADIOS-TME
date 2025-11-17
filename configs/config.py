@@ -37,6 +37,9 @@ def get_args_parser():
                         help='Number of layers in TME head')
     
     # ========== Mask Model ==========
+    parser.add_argument('--mask_model_type', default='vit_unet', type=str,
+                    choices=['vit_unet', 'adios'],
+
     parser.add_argument('--num_masks', default=3, type=int,
                         help='Number of semantic masks to generate')
     parser.add_argument('--crops_per_mask', default=1, type=int,

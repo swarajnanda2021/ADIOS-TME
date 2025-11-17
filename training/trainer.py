@@ -77,32 +77,46 @@ def train_adios_tme(args):
         tme_head=tme_head
     )
     
-    # Mask model
-    mask_encoder = VisionTransformer(
-        img_size=224,
-        patch_size=16,
-        embed_dim=args.mask_encoder_dim,
-        depth=args.mask_encoder_depth,
-        num_heads=args.mask_encoder_dim // 64,
-        mlp_ratio=4.0,
-        drop_path_rate=0.1,
-        num_register_tokens=4,
-    )
-
-    if args.mask_encoder_checkpoint is not None:
-        from .helpers import load_mask_encoder_from_student_checkpoint
-        mask_encoder = load_mask_encoder_from_student_checkpoint(
-            mask_encoder,
-            args.mask_encoder_checkpoint,
-            freeze=args.freeze_mask_encoder
+    # Create mask model based on type
+    if args.mask_model_type == 'vit_unet':
+        # Your original approach: ViT encoder + U-Net decoder
+        print("Using ViT-UNet mask model (your approach)")
+        mask_encoder = VisionTransformer(
+            img_size=224,
+            patch_size=16,
+            embed_dim=args.mask_encoder_dim,
+            depth=args.mask_encoder_depth,
+            num_heads=args.mask_encoder_dim // 64,
+            mlp_ratio=4.0,
+            drop_path_rate=0.1,
+            num_register_tokens=4,
         )
-    
-    mask_model = MaskModel_SpectralNorm(
-        encoder=mask_encoder,
-        num_masks=args.num_masks,
-        encoder_dim=args.mask_encoder_dim,
-        drop_rate=0.2
-    )
+        
+        # Load pretrained encoder if specified
+        if hasattr(args, 'mask_encoder_checkpoint') and args.mask_encoder_checkpoint is not None:
+            from .helpers import load_mask_encoder_from_student_checkpoint
+            mask_encoder = load_mask_encoder_from_student_checkpoint(
+                mask_encoder,
+                args.mask_encoder_checkpoint,
+                freeze=getattr(args, 'freeze_mask_encoder', True)
+            )
+        
+        mask_model = MaskModel_SpectralNorm(
+            encoder=mask_encoder,
+            num_masks=args.num_masks,
+            encoder_dim=args.mask_encoder_dim,
+            drop_rate=0.2
+        )
+        
+    elif args.mask_model_type == 'adios':
+        # ADIOS approach: Simple U-Net on RGB images (no downsampling)
+        print("Using ADIOS mask model (YugeTen et al. 2022)")
+        from models.vision_transformer.auxiliary_models import ADIOSMaskModel
+        mask_model = ADIOSMaskModel(
+            num_masks=args.num_masks,
+            img_size=224,
+            drop_rate=0.0  # ADIOS doesn't use dropout
+        )
     
     # Reconstructor (conditional creation)
     reconstructor = None

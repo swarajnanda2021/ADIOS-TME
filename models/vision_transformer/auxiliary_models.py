@@ -1198,3 +1198,153 @@ class ReconstructorModel(nn.Module):
         reconstructed = self._forward_upsample(masks, f1, f2, f3, f4, self.image_decoder)
         return torch.tanh(reconstructed) 
 
+
+
+
+# ===== ADIOS UNet without skip connections ===== #
+
+
+class ADIOSMaskModel(nn.Module):
+    """
+    ADIOS mask model - simple U-Net operating on RGB images.
+    Based on: Shi et al., "Adversarial Masking for Self-Supervised Learning", ICML 2022
+    
+    Key differences from our approach:
+    - Operates on RGB images directly (not ViT features)
+    - Uses GroupNorm instead of InstanceNorm
+    - Simpler architecture without skip connections to encoder features
+    - Pixel-wise softmax across masks
+    """
+    def __init__(self, num_masks=3, img_size=224, drop_rate=0.0):
+        super().__init__()
+        
+        self.num_masks = num_masks
+        self.img_size = img_size
+        
+        # Down blocks (5 blocks as per ADIOS Table 8)
+        # Note: ADIOS doesn't use downsampling - keeps full resolution
+        self.down1 = nn.Sequential(
+            nn.Conv2d(3, 8, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(4, 8),  # 4 groups for 8 channels
+            nn.ReLU(inplace=True)
+        )
+        self.down2 = nn.Sequential(
+            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(4, 8),
+            nn.ReLU(inplace=True)
+        )
+        self.down3 = nn.Sequential(
+            nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(8, 16),  # 8 groups for 16 channels
+            nn.ReLU(inplace=True)
+        )
+        self.down4 = nn.Sequential(
+            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(8, 16),
+            nn.ReLU(inplace=True)
+        )
+        self.down5 = nn.Sequential(
+            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(8, 16),
+            nn.ReLU(inplace=True)
+        )
+        
+        # MLP (bottleneck)
+        # Calculate flattened size: 16 channels * img_size * img_size
+        flattened_size = 16 * img_size * img_size
+        self.mlp = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flattened_size, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 256),
+            nn.ReLU(inplace=True),
+            # Expand back
+            nn.Linear(256, flattened_size),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Up blocks (5 blocks, mirror of down)
+        self.up1 = nn.Sequential(
+            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(8, 16),
+            nn.ReLU(inplace=True)
+        )
+        self.up2 = nn.Sequential(
+            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(8, 16),
+            nn.ReLU(inplace=True)
+        )
+        self.up3 = nn.Sequential(
+            nn.Conv2d(16, 8, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(4, 8),
+            nn.ReLU(inplace=True)
+        )
+        self.up4 = nn.Sequential(
+            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(4, 8),
+            nn.ReLU(inplace=True)
+        )
+        self.up5 = nn.Sequential(
+            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(4, 8),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Final occlusion head: 1x1 conv to produce N masks
+        self.occlusion_head = nn.Conv2d(8, num_masks, kernel_size=1, stride=1, padding=0)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.GroupNorm):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, images):
+        """
+        Args:
+            images: RGB images [B, 3, H, W]
+            
+        Returns:
+            dict with 'masks': [B, num_masks, H, W] with pixel-wise softmax
+        """
+        B, C, H, W = images.shape
+        
+        # Down path
+        x = self.down1(images)
+        x = self.down2(x)
+        x = self.down3(x)
+        x = self.down4(x)
+        x = self.down5(x)
+        
+        # MLP bottleneck
+        x_flat = self.mlp(x)
+        x = x_flat.view(B, 16, H, W)
+        
+        # Up path
+        x = self.up1(x)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        x = self.up5(x)
+        
+        # Occlusion head
+        logits = self.occlusion_head(x)  # [B, num_masks, H, W]
+        
+        # Pixel-wise softmax across masks (crucial for ADIOS)
+        masks = F.softmax(logits, dim=1)  # Sum to 1 across masks for each pixel
+        
+        return {
+            "masks": masks,  # [B, num_masks, H, W]
+        }

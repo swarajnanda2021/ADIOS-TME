@@ -135,6 +135,7 @@ def main():
     args.tme_layers = 3
 
     # ========== Mask Model Configuration ==========
+    args.mask_model_type = 'adios'  # Ours: 'vit_unet', ADIOS:'adios'
     args.num_masks = 3
     args.mask_encoder_dim = 384
     args.mask_encoder_depth = 12
@@ -165,7 +166,7 @@ def main():
     args.warmup_iterations = 10_000
     args.lr = 5e-5
     args.min_lr = 1e-6
-    args.weight_decay = 0.04
+    args.weight_decay = 0.0 # ADIOS: 0.0, Ours: 0.04
     args.clip_grad = 1.0
 
     # ========== Training Setup ==========
