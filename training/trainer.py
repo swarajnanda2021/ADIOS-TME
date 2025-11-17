@@ -88,6 +88,14 @@ def train_adios_tme(args):
         drop_path_rate=0.1,
         num_register_tokens=4,
     )
+
+    if args.mask_encoder_checkpoint is not None:
+        from .helpers import load_mask_encoder_from_student_checkpoint
+        mask_encoder = load_mask_encoder_from_student_checkpoint(
+            mask_encoder,
+            args.mask_encoder_checkpoint,
+            freeze=args.freeze_mask_encoder
+        )
     
     mask_model = MaskModel_SpectralNorm(
         encoder=mask_encoder,

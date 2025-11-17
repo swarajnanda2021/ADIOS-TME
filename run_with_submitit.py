@@ -142,6 +142,9 @@ def main():
     args.mask_dropout = 0.2
     args.crops_per_mask = 0
     args.sparsity_penalty_type = 'sinh_squared'
+    # In case you don't want to train the mask model backbone and have a checkpoint ready
+    args.freeze_mask_encoder = True
+    args.mask_encoder_checkpoint = '/data1/vanderbc/nandas1/TCGA_Dinov2_ViT-B_run2/logs/checkpoint.pth' 
 
     # ========== Reconstructor Model Configuration ==========
     args.use_reconstructor = True

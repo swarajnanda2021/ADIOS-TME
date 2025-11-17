@@ -49,6 +49,11 @@ def get_args_parser():
                         help='Update mask model every N iterations')
     parser.add_argument('--mask_dropout', default=0.2, type=float,
                         help='Dropout rate in mask decoder')
+    # In case you don't want to train the backbone
+    parser.add_argument('--mask_encoder_checkpoint', default=None, type=str,
+                    help='Path to checkpoint containing pretrained encoder for mask model (student.module.backbone)')
+    parser.add_argument('--freeze_mask_encoder', default=True, type=utils.bool_flag,
+                        help='Whether to freeze mask encoder after loading from checkpoint')
     
     # ========== Reconstructor Model (ADIOS versus Ours) ==========
     parser.add_argument('--use_reconstructor', action='store_true', default=False,

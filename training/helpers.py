@@ -552,3 +552,71 @@ def process_student_with_cached_masks_and_crops(
     
     return loss, metrics
 
+def load_mask_encoder_from_student_checkpoint(mask_encoder, checkpoint_path, freeze=True):
+    """
+    Load mask encoder weights from a student checkpoint.
+    
+    Args:
+        mask_encoder: VisionTransformer encoder to load weights into
+        checkpoint_path: Path to checkpoint file containing student model
+        freeze: Whether to freeze encoder parameters after loading
+        
+    Returns:
+        mask_encoder with loaded weights
+    """
+    print(f"Loading mask encoder from student checkpoint: {checkpoint_path}")
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+    
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    
+    if 'student' not in checkpoint:
+        raise KeyError("'student' key not found in checkpoint. Available keys: " + 
+                      str(list(checkpoint.keys())))
+    
+    student_state = checkpoint['student']
+    
+    # Extract backbone weights from DDP-wrapped student
+    encoder_state = {}
+    prefix = 'module.backbone.'
+    
+    for k, v in student_state.items():
+        if k.startswith(prefix):
+            # Remove 'module.backbone.' prefix
+            new_key = k.replace(prefix, '')
+            encoder_state[new_key] = v
+    
+    if not encoder_state:
+        print("Warning: No backbone weights found with 'module.backbone.' prefix")
+        print("Trying alternative prefixes...")
+        
+        # Try without 'module.' prefix (non-DDP)
+        prefix = 'backbone.'
+        for k, v in student_state.items():
+            if k.startswith(prefix):
+                new_key = k.replace(prefix, '')
+                encoder_state[new_key] = v
+    
+    if not encoder_state:
+        raise ValueError("Could not extract encoder weights from checkpoint. "
+                        "Check that checkpoint contains 'student.module.backbone' or 'student.backbone'")
+    
+    # Load weights into mask encoder
+    msg = mask_encoder.load_state_dict(encoder_state, strict=False)
+    print(f"Loaded {len(encoder_state)} parameters into mask encoder")
+    print(f"Load result: {msg}")
+    
+    if 'iteration' in checkpoint:
+        print(f"Checkpoint was saved at iteration: {checkpoint['iteration']}")
+    
+    # Freeze encoder if requested
+    if freeze:
+        frozen_params = 0
+        for param in mask_encoder.parameters():
+            param.requires_grad = False
+            frozen_params += 1
+        print(f"Froze {frozen_params} parameters in mask encoder")
+    
+    return mask_encoder
