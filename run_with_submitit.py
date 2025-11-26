@@ -15,7 +15,7 @@ from training.trainer import train_adios_tme
 
 def get_shared_folder() -> Path:
     """Get shared folder for logs and checkpoints."""
-    p = Path(f"/data1/vanderbc/nandas1/ADIOS-TME/logs")
+    p = Path(f"/data1/vanderbc/nandas1/ADIOS-UNet/logs")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -59,7 +59,7 @@ def main():
     """Main submitit launcher."""
     
     # ========== SLURM Configuration ==========
-    ngpus = 4
+    ngpus = 2
     nodes = 1
     timeout_min = 10000
     partition = "vanderbc_gpu"
@@ -105,7 +105,7 @@ def main():
     mask_lr_ratio = 0.25
 
     # ========== Training Configuration ==========
-    batch_size_per_gpu = 64  # <vit_unet preset> 64
+    batch_size_per_gpu = 128  # <vit_unet preset> 64
     total_iterations = 300_000
     warmup_iterations = 10_000
     
@@ -246,7 +246,6 @@ def main():
     print(f"Optimizer: {optimizer_type}" + (" + LARS" if use_lars else ""))
     print(f"Batch size: {batch_size_per_gpu} per GPU × {ngpus * nodes} GPUs = {effective_batch}")
     print(f"LR: {lr:.6f}")
-    print(f"Reconstructor: {use_reconstructor}")
     print("=" * 80)
     print()
     print(f"Monitor: tail -f {args.output_dir}/{job.job_id}_0_log.out")
