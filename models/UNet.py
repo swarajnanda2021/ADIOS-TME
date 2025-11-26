@@ -6,7 +6,7 @@ Reference: Shi et al. "Adversarial Masking for Self-Supervised Learning" (ICML 2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import numpy as np
 
 
 class ADIOSMaskModel(nn.Module):
