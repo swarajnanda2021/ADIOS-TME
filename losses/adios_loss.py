@@ -104,14 +104,15 @@ class ADIOSLoss(nn.Module):
         pos_mask[:b, b:].fill_diagonal_(True)  # z1[i] <-> z2[i]
         pos_mask[b:, :b].fill_diagonal_(True)  # z2[i] <-> z1[i]
         
-        # All matches excluding self (main diagonal)
-        logit_mask = torch.ones_like(pos_mask, device=device).fill_diagonal_(0)
-        
-        # Compute exp similarities (exclude self-similarity)
-        exp_logits = torch.exp(logits) * logit_mask
-        
-        # Log probabilities: log(exp(sim_pos) / sum(exp(sim_all)))
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-7)
+        # Mask out self-similarity by setting diagonal to -inf (won't contribute to logsumexp)
+        logits_masked = logits.clone()
+        logits_masked.fill_diagonal_(-float('inf'))
+
+        # Numerically stable logsumexp (handles max-subtraction internally)
+        log_sum_exp = torch.logsumexp(logits_masked, dim=1, keepdim=True)
+
+        # Log probabilities: logits - log(sum(exp(logits_masked)))
+        log_prob = logits - log_sum_exp
         
         # Mean log probability over positives
         mean_log_prob_pos = (pos_mask * log_prob).sum(1) / pos_mask.sum(1)
