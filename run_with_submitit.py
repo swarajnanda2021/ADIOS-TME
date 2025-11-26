@@ -109,7 +109,7 @@ def main():
     lars_eta = 0.02
     momentum = 0.9
     exclude_bias_n_norm_lars = True
-    mask_lr_ratio = 1.0
+    mask_lr_ratio = 0.25
 
     # ========== Training Configuration ==========
     batch_size_per_gpu = 64  # <vit_unet preset> 64
@@ -119,7 +119,7 @@ def main():
     effective_batch = batch_size_per_gpu * ngpus * nodes
     lr = 0.4 * (effective_batch / 256.0)  # <vit_unet preset> 5e-5 * (effective_batch / 256.0)
     min_lr = 1e-5  # <vit_unet preset> 1e-6
-    weight_decay = 0.0  # <vit_unet preset> 0.04
+    weight_decay = 0.04  # <vit_unet preset> 0.04
     clip_grad = 1.0
 
     # ========== Training Setup ==========
