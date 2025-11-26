@@ -208,7 +208,6 @@ class CombinedDataset:
             return self.train_ds[idx]
         return self.test_ds[idx - self.train_len]
 
-
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -221,89 +220,134 @@ def main():
     pannuke_path = "/data1/vanderbc/nandas1/Benchmarks/PanNuke_patches_unnormalized"
     monuseg_path = "/data1/vanderbc/nandas1/Benchmarks/MonuSeg_patches_unnormalized"
     
+    results_path = output_dir / 'nuclei_channel_benchmark.json'
+    
+    # Load existing results if available
+    existing_results = None
+    evaluated_iterations = set()
+    
+    if results_path.exists():
+        print(f"Loading existing results from {results_path}")
+        with open(results_path, 'r') as f:
+            existing_results = json.load(f)
+        evaluated_iterations = set(existing_results['iterations'])
+        print(f"  Already evaluated: {sorted(evaluated_iterations)}")
+    
     # Find checkpoints
-    print(f"Searching for checkpoints in {logs_dir}...")
+    print(f"\nSearching for checkpoints in {logs_dir}...")
     checkpoints = find_checkpoints(str(logs_dir))
     
     if not checkpoints:
         print(f"No checkpoints found in {logs_dir}")
-        print("Looking for checkpoint_iter_*.pth files")
         return
     
-    print(f"Found {len(checkpoints)} checkpoints:")
-    for iteration, path in checkpoints:
+    # Filter out already-evaluated checkpoints
+    new_checkpoints = [(it, path) for it, path in checkpoints if it not in evaluated_iterations]
+    
+    print(f"Found {len(checkpoints)} total checkpoints, {len(new_checkpoints)} new:")
+    for iteration, path in new_checkpoints:
         print(f"  {iteration:>7d}: {os.path.basename(path)}")
     
-    # Create transform (no augmentation for evaluation)
-    transform_settings = {
-        "normalize": {"mean": [0.6816, 0.5640, 0.7232], "std": [0.1617, 0.1714, 0.1389]},
-        "RandomRotate90": {"p": 0}, "HorizontalFlip": {"p": 0}, "VerticalFlip": {"p": 0},
-        "Downscale": {"scale": 0.5, "p": 0}, "Blur": {"blur_limit": 7, "p": 0},
-        "ColorJitter": {"scale_setting": 0.25, "scale_color": 0.1, "p": 0}
-    }
-    transform = SynchronizedTransform(transform_settings, input_shape=96)
-    
-    # Load datasets
-    print("\nLoading datasets...")
-    pannuke = CombinedDataset(
-        PanNukeDataset(pannuke_path, 'Training', '40x', transform),
-        PanNukeDataset(pannuke_path, 'Test', '40x', transform)
-    )
-    monuseg = CombinedDataset(
-        MonuSegDataset(monuseg_path, 'Training', '40x', transform),
-        MonuSegDataset(monuseg_path, 'Test', '40x', transform)
-    )
-    print(f"  PanNuke: {len(pannuke)} samples")
-    print(f"  MonuSeg: {len(monuseg)} samples")
-    
-    # Results storage
-    results = {
-        'iterations': [],
-        'pannuke_mean': [], 'pannuke_std': [],
-        'monuseg_mean': [], 'monuseg_std': []
-    }
-    
-    # Evaluate each checkpoint
-    for iteration, ckpt_path in checkpoints:
-        print(f"\n{'='*60}")
-        print(f"Iteration {iteration}")
-        print(f"{'='*60}")
+    if not new_checkpoints:
+        print("\nNo new checkpoints to evaluate. Regenerating plot from existing data.")
+        # Skip to plotting
+        results = existing_results
+    else:
+        # Create transform (no augmentation for evaluation)
+        transform_settings = {
+            "normalize": {"mean": [0.6816, 0.5640, 0.7232], "std": [0.1617, 0.1714, 0.1389]},
+            "RandomRotate90": {"p": 0}, "HorizontalFlip": {"p": 0}, "VerticalFlip": {"p": 0},
+            "Downscale": {"scale": 0.5, "p": 0}, "Blur": {"blur_limit": 7, "p": 0},
+            "ColorJitter": {"scale_setting": 0.25, "scale_color": 0.1, "p": 0}
+        }
+        transform = SynchronizedTransform(transform_settings, input_shape=96)
         
-        # Load checkpoint args
-        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-        args = checkpoint.get('args', None)
+        # Load datasets
+        print("\nLoading datasets...")
+        pannuke = CombinedDataset(
+            PanNukeDataset(pannuke_path, 'Training', '40x', transform),
+            PanNukeDataset(pannuke_path, 'Test', '40x', transform)
+        )
+        monuseg = CombinedDataset(
+            MonuSegDataset(monuseg_path, 'Training', '40x', transform),
+            MonuSegDataset(monuseg_path, 'Test', '40x', transform)
+        )
+        print(f"  PanNuke: {len(pannuke)} samples")
+        print(f"  MonuSeg: {len(monuseg)} samples")
         
-        if args is None:
-            print("  WARNING: No args in checkpoint, using defaults (adios, 3 masks)")
-            import argparse
-            args = argparse.Namespace(mask_model_type='adios', num_masks=3)
+        # Initialize results (from existing or empty)
+        if existing_results:
+            results = existing_results
+        else:
+            results = {
+                'iterations': [],
+                'pannuke_mean': [], 'pannuke_std': [],
+                'monuseg_mean': [], 'monuseg_std': []
+            }
         
-        # Build and load model
-        mask_model = build_mask_model_from_args(args, device)
-        mask_model = load_mask_model_weights(mask_model, ckpt_path)
-        mask_model.eval()
+        # Evaluate new checkpoints
+        for iteration, ckpt_path in new_checkpoints:
+            print(f"\n{'='*60}")
+            print(f"Iteration {iteration}")
+            print(f"{'='*60}")
+            
+            # Load checkpoint args
+            checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+            args = checkpoint.get('args', None)
+            
+            if args is None:
+                print("  WARNING: No args in checkpoint, using defaults (adios, 3 masks)")
+                args = argparse.Namespace(mask_model_type='adios', num_masks=3)
+            
+            # Build and load model
+            mask_model = build_mask_model_from_args(args, device)
+            mask_model = load_mask_model_weights(mask_model, ckpt_path)
+            mask_model.eval()
+            
+            # Evaluate
+            print("  Evaluating PanNuke...")
+            pannuke_ious = evaluate_checkpoint(mask_model, pannuke, device)
+            
+            print("  Evaluating MonuSeg...")
+            monuseg_ious = evaluate_checkpoint(mask_model, monuseg, device)
+            
+            # Store results
+            results['iterations'].append(iteration)
+            results['pannuke_mean'].append(float(pannuke_ious.mean()))
+            results['pannuke_std'].append(float(pannuke_ious.std()))
+            results['monuseg_mean'].append(float(monuseg_ious.mean()))
+            results['monuseg_std'].append(float(monuseg_ious.std()))
+            
+            print(f"  PanNuke mIoU: {pannuke_ious.mean():.4f} ± {pannuke_ious.std():.4f}")
+            print(f"  MonuSeg mIoU: {monuseg_ious.mean():.4f} ± {monuseg_ious.std():.4f}")
+            
+            # Cleanup
+            del mask_model, checkpoint
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            # Save intermediate results (in case of crash)
+            sorted_indices = np.argsort(results['iterations'])
+            sorted_results = {
+                'iterations': [results['iterations'][i] for i in sorted_indices],
+                'pannuke_mean': [results['pannuke_mean'][i] for i in sorted_indices],
+                'pannuke_std': [results['pannuke_std'][i] for i in sorted_indices],
+                'monuseg_mean': [results['monuseg_mean'][i] for i in sorted_indices],
+                'monuseg_std': [results['monuseg_std'][i] for i in sorted_indices],
+            }
+            with open(results_path, 'w') as f:
+                json.dump(sorted_results, f, indent=2)
+            print(f"  Saved intermediate results to {results_path}")
         
-        # Evaluate
-        print("  Evaluating PanNuke...")
-        pannuke_ious = evaluate_checkpoint(mask_model, pannuke, device)
-        
-        print("  Evaluating MonuSeg...")
-        monuseg_ious = evaluate_checkpoint(mask_model, monuseg, device)
-        
-        # Store results
-        results['iterations'].append(iteration)
-        results['pannuke_mean'].append(float(pannuke_ious.mean()))
-        results['pannuke_std'].append(float(pannuke_ious.std()))
-        results['monuseg_mean'].append(float(monuseg_ious.mean()))
-        results['monuseg_std'].append(float(monuseg_ious.std()))
-        
-        print(f"  PanNuke mIoU: {pannuke_ious.mean():.4f} ± {pannuke_ious.std():.4f}")
-        print(f"  MonuSeg mIoU: {monuseg_ious.mean():.4f} ± {monuseg_ious.std():.4f}")
-        
-        # Cleanup
-        del mask_model, checkpoint
-        gc.collect()
-        torch.cuda.empty_cache()
+        # Sort final results by iteration
+        sorted_indices = np.argsort(results['iterations'])
+        results = {
+            'iterations': [results['iterations'][i] for i in sorted_indices],
+            'pannuke_mean': [results['pannuke_mean'][i] for i in sorted_indices],
+            'pannuke_std': [results['pannuke_std'][i] for i in sorted_indices],
+            'monuseg_mean': [results['monuseg_mean'][i] for i in sorted_indices],
+            'monuseg_std': [results['monuseg_std'][i] for i in sorted_indices],
+        }
     
     # Convert to arrays for plotting
     iterations = np.array(results['iterations'])
@@ -344,8 +388,7 @@ def main():
     plt.close()
     print(f"Plot saved to {output_path}")
     
-    # Save numerical results
-    results_path = output_dir / 'nuclei_channel_benchmark.json'
+    # Save final results
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"Results saved to {results_path}")
@@ -357,7 +400,6 @@ def main():
     for i, it in enumerate(results['iterations']):
         print(f"  {it:>6d}:  PanNuke={results['pannuke_mean'][i]:.4f}±{results['pannuke_std'][i]:.4f}  "
               f"MonuSeg={results['monuseg_mean'][i]:.4f}±{results['monuseg_std'][i]:.4f}")
-
 
 if __name__ == '__main__':
     main()
