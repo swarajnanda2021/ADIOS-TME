@@ -222,7 +222,7 @@ def train_adios_tme(args):
     elif args.mask_model_type == 'adios':
         # ADIOS approach: Simple U-Net on RGB images (no downsampling)
         print("Using ADIOS mask model (YugeTen et al. 2022)")
-        from models.vision_transformer.auxiliary_models import ADIOSMaskModel
+        from models.UNet import ADIOSMaskModel
         mask_model = ADIOSMaskModel(
             num_masks=args.num_masks,
             img_size=224,

@@ -133,7 +133,7 @@ class ADIOSLoss(nn.Module):
             sin_term = torch.sin(mean_activation * math.pi) + 1e-10
             penalty += (1 / sin_term).mean()
         
-        return penalty / masks.shape[1]
+        return penalty #/ masks.shape[1]
 
     def sparsity_penalty_sinh_squared(self, masks):
         """
@@ -146,7 +146,7 @@ class ADIOSLoss(nn.Module):
             centered_x = mean_activation - 0.5
             penalty += (torch.sinh(torch.abs(centered_x) * math.pi) ** 2).mean()
         
-        return penalty / masks.shape[1]
+        return penalty #/ masks.shape[1]
 
     def sparsity_penalty(self, masks):
         """Compute sparsity penalty based on configured type."""

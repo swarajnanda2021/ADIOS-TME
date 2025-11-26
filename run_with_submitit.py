@@ -109,10 +109,10 @@ def main():
     lars_eta = 0.02
     momentum = 0.9
     exclude_bias_n_norm_lars = True
-    mask_lr_ratio = 0.25
+    mask_lr_ratio = 1.0
 
     # ========== Training Configuration ==========
-    batch_size_per_gpu = 8  # <vit_unet preset> 64
+    batch_size_per_gpu = 64  # <vit_unet preset> 64
     total_iterations = 300_000
     warmup_iterations = 10_000
     

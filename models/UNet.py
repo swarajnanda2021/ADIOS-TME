@@ -8,184 +8,164 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
 class ADIOSMaskModel(nn.Module):
     """
-    U-Net based mask generator from ADIOS paper.
+    ADIOS mask model - UNet with skip connections operating on RGB images.
+    Based on: Shi et al., "Adversarial Masking for Self-Supervised Learning", ICML 2022
     
-    Architecture from Table 8:
-    - Downsampling path: 5 conv layers with GroupNorm
-    - MLP bottleneck: 3 FC layers
-    - Upsampling path: 5 conv layers with GroupNorm
-    - Output head: 1x1 conv + softmax
-    
-    Args:
-        num_masks: Number of masks to generate (N in paper)
-        img_size: Input image size (default: 224)
+    Matches YugeTen's architecture from src/utils/unet.py
     """
-    def __init__(self, num_masks=4, img_size=224):
+    def __init__(self, num_masks=3, img_size=224, filter_start=32, norm='gn'):
         super().__init__()
+        
         self.num_masks = num_masks
         self.img_size = img_size
         
-        # ============ Downsampling Path ============
-        # Input: [B, 3, 224, 224]
+        # Number of blocks based on image size (YugeTen formula)
+        num_blocks = int(np.log2(img_size) - 1)  # 6 for 224x224
+        self.num_blocks = num_blocks
         
-        # Block 1: 3 -> 8 channels
-        self.down_conv1 = nn.Conv2d(3, 8, kernel_size=3, stride=1, padding=1)
-        self.down_gn1 = nn.GroupNorm(4, 8)  # 4 groups for 8 channels
+        c = filter_start
         
-        self.down_conv2 = nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1)
-        self.down_gn2 = nn.GroupNorm(4, 8)
+        # Select normalization-aware conv block
+        if norm == 'in':
+            conv_block = ConvINReLU
+        elif norm == 'gn':
+            conv_block = ConvGNReLU
+        else:
+            conv_block = ConvReLU
         
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)  # 224 -> 112
+        # Channel configurations based on num_blocks (from YugeTen)
+        if num_blocks == 4:
+            enc_in = [3, c, 2*c, 2*c]
+            enc_out = [c, 2*c, 2*c, 2*c]
+            dec_in = [4*c, 4*c, 4*c, 2*c]
+            dec_out = [2*c, 2*c, c, c]
+        elif num_blocks == 5:
+            enc_in = [3, c, c, 2*c, 2*c]
+            enc_out = [c, c, 2*c, 2*c, 2*c]
+            dec_in = [4*c, 4*c, 4*c, 2*c, 2*c]
+            dec_out = [2*c, 2*c, c, c, c]
+        elif num_blocks == 6:
+            enc_in = [3, c, c, c, 2*c, 2*c]
+            enc_out = [c, c, c, 2*c, 2*c, 2*c]
+            dec_in = [4*c, 4*c, 4*c, 2*c, 2*c, 2*c]
+            dec_out = [2*c, 2*c, c, c, c, c]
+        elif num_blocks == 7:
+            enc_in = [3, c, c, c, c, 2*c, 2*c]
+            enc_out = [c, c, c, c, 2*c, 2*c, 2*c]
+            dec_in = [4*c, 4*c, 4*c, 4*c, 2*c, 2*c, 2*c]
+            dec_out = [2*c, 2*c, 2*c, c, c, c, c]
+        else:
+            raise ValueError(f"num_blocks={num_blocks} not supported. Use 4, 5, 6, or 7.")
         
-        # Block 2: 8 -> 16 channels
-        self.down_conv3 = nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1)
-        self.down_gn3 = nn.GroupNorm(8, 16)  # 8 groups for 16 channels
+        # Build encoder (down) blocks
+        self.down = nn.ModuleList()
+        for i, o in zip(enc_in, enc_out):
+            self.down.append(conv_block(i, o, 3, 1, 1))
         
-        self.down_conv4 = nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1)
-        self.down_gn4 = nn.GroupNorm(8, 16)
+        # Build decoder (up) blocks
+        self.up = nn.ModuleList()
+        for i, o in zip(dec_in, dec_out):
+            self.up.append(conv_block(i, o, 3, 1, 1))
         
-        self.down_conv5 = nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1)
-        self.down_gn5 = nn.GroupNorm(8, 16)
+        # MLP bottleneck
+        self.featuremap_size = img_size // (2 ** (num_blocks - 1))
+        bottleneck_dim = 2 * c * self.featuremap_size * self.featuremap_size
         
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # 112 -> 56
+        self.mlp = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(bottleneck_dim, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, bottleneck_dim),
+            nn.ReLU(inplace=True)
+        )
         
-        # ============ MLP Bottleneck ============
-        # Input: [B, 16, 56, 56] -> [B, 16*56*56] = [B, 50176]
-        self.flatten_size = 16 * (img_size // 4) * (img_size // 4)  # 16 * 56 * 56
+        # Final 1x1 conv to produce num_masks channels
+        self.final_conv = nn.Conv2d(dec_out[-1], num_masks, kernel_size=1)
         
-        self.mlp_fc1 = nn.Linear(self.flatten_size, 128)
-        self.mlp_fc2 = nn.Linear(128, 128)
-        self.mlp_fc3 = nn.Linear(128, 256)
-        
-        # ============ Upsampling Path ============
-        # We need to go back to spatial dimensions
-        # 256 -> reshape to [B, 16, 4, 4] then upsample
-        self.mlp_to_spatial = nn.Linear(256, 16 * 4 * 4)  # Small spatial size to start
-        self.upsample_size = 4
-        
-        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 4 -> 8
-        
-        # Block 1: 16 channels
-        self.up_conv1 = nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1)
-        self.up_gn1 = nn.GroupNorm(8, 16)
-        
-        self.up_conv2 = nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1)
-        self.up_gn2 = nn.GroupNorm(8, 16)
-        
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 8 -> 16
-        
-        # Block 2: 16 -> 8 channels
-        self.up_conv3 = nn.Conv2d(16, 8, kernel_size=3, stride=1, padding=1)
-        self.up_gn3 = nn.GroupNorm(4, 8)
-        
-        self.up_conv4 = nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1)
-        self.up_gn4 = nn.GroupNorm(4, 8)
-        
-        self.up_conv5 = nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1)
-        self.up_gn5 = nn.GroupNorm(4, 8)
-        
-        # Final upsampling to match input size
-        # Currently at 16x16, need to go to 224x224
-        self.final_upsample = nn.Upsample(size=(img_size, img_size), mode='bilinear', align_corners=False)
-        
-        # ============ Occlusion Head ============
-        self.head = nn.Conv2d(8, num_masks, kernel_size=1, stride=1, padding=0)
-        
-        # Softmax is applied in forward (across mask dimension)
-        
-    def forward(self, x):
+        # Initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.GroupNorm, nn.InstanceNorm2d)):
+            if m.weight is not None:
+                nn.init.constant_(m.weight, 1)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, images):
         """
         Args:
-            x: Input images [B, 3, H, W]
+            images: RGB images [B, 3, H, W]
             
         Returns:
-            Dictionary with 'masks': [B, num_masks, H, W] with softmax applied
+            dict with 'masks': [B, num_masks, H, W] with pixel-wise softmax
         """
-        batch_size = x.size(0)
+        batch_size = images.size(0)
         
-        # ============ Downsampling ============
-        # Block 1
-        x = self.down_conv1(x)
-        x = self.down_gn1(x)
-        x = F.relu(x)
+        x_down = [images]
+        skip = []
         
-        x = self.down_conv2(x)
-        x = self.down_gn2(x)
-        x = F.relu(x)
+        # Encoder path with skip connections
+        for i, block in enumerate(self.down):
+            act = block(x_down[-1])
+            skip.append(act)
+            if i < len(self.down) - 1:
+                act = F.interpolate(act, scale_factor=0.5, mode='nearest')
+            x_down.append(act)
         
-        x = self.pool1(x)  # [B, 8, 112, 112]
+        # MLP bottleneck
+        x_up = self.mlp(x_down[-1])
+        x_up = x_up.view(batch_size, -1, self.featuremap_size, self.featuremap_size)
         
-        # Block 2
-        x = self.down_conv3(x)
-        x = self.down_gn3(x)
-        x = F.relu(x)
+        # Decoder path with skip connections
+        for i, block in enumerate(self.up):
+            # Concatenate with corresponding skip connection
+            features = torch.cat([x_up, skip[-1 - i]], dim=1)
+            x_up = block(features)
+            if i < len(self.up) - 1:
+                x_up = F.interpolate(x_up, scale_factor=2.0, mode='nearest')
         
-        x = self.down_conv4(x)
-        x = self.down_gn4(x)
-        x = F.relu(x)
+        # Final conv to get mask logits
+        logits = self.final_conv(x_up)
         
-        x = self.down_conv5(x)
-        x = self.down_gn5(x)
-        x = F.relu(x)
-        
-        x = self.pool2(x)  # [B, 16, 56, 56]
-        
-        # ============ MLP Bottleneck ============
-        x = x.view(batch_size, -1)  # [B, 16*56*56]
-        
-        x = self.mlp_fc1(x)
-        x = F.relu(x)
-        
-        x = self.mlp_fc2(x)
-        x = F.relu(x)
-        
-        x = self.mlp_fc3(x)
-        x = F.relu(x)  # [B, 256]
-        
-        # ============ Upsampling ============
-        # Back to spatial
-        x = self.mlp_to_spatial(x)  # [B, 16*4*4]
-        x = x.view(batch_size, 16, self.upsample_size, self.upsample_size)  # [B, 16, 4, 4]
-        
-        x = self.up1(x)  # [B, 16, 8, 8]
-        
-        # Block 1
-        x = self.up_conv1(x)
-        x = self.up_gn1(x)
-        x = F.relu(x)
-        
-        x = self.up_conv2(x)
-        x = self.up_gn2(x)
-        x = F.relu(x)
-        
-        x = self.up2(x)  # [B, 16, 16, 16]
-        
-        # Block 2
-        x = self.up_conv3(x)
-        x = self.up_gn3(x)
-        x = F.relu(x)
-        
-        x = self.up_conv4(x)
-        x = self.up_gn4(x)
-        x = F.relu(x)
-        
-        x = self.up_conv5(x)
-        x = self.up_gn5(x)
-        x = F.relu(x)  # [B, 8, 16, 16]
-        
-        # Upsample to full resolution
-        x = self.final_upsample(x)  # [B, 8, 224, 224]
-        
-        # ============ Occlusion Head ============
-        masks = self.head(x)  # [B, num_masks, 224, 224]
-        
-        # Apply softmax across mask dimension (ensures sum to 1 per pixel)
-        masks = F.softmax(masks, dim=1)
+        # Pixel-wise softmax across masks
+        masks = F.softmax(logits, dim=1)
         
         return {"masks": masks}
-    
-    def get_num_params(self):
-        """Count total number of parameters."""
-        return sum(p.numel() for p in self.parameters())
+
+
+class ConvReLU(nn.Sequential):
+    def __init__(self, nin, nout, kernel, stride=1, padding=0):
+        super(ConvReLU, self).__init__(
+            nn.Conv2d(nin, nout, kernel, stride, padding),
+            nn.ReLU(inplace=True)
+        )
+
+class ConvINReLU(nn.Sequential):
+    def __init__(self, nin, nout, kernel, stride=1, padding=0):
+        super(ConvINReLU, self).__init__(
+            nn.Conv2d(nin, nout, kernel, stride, padding, bias=False),
+            nn.InstanceNorm2d(nout, affine=True),
+            nn.ReLU(inplace=True)
+        )
+
+class ConvGNReLU(nn.Sequential):
+    def __init__(self, nin, nout, kernel, stride=1, padding=0, groups=8):
+        super(ConvGNReLU, self).__init__(
+            nn.Conv2d(nin, nout, kernel, stride, padding, bias=False),
+            nn.GroupNorm(groups, nout),
+            nn.ReLU(inplace=True)
+        )
