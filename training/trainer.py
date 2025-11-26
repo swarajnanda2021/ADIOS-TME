@@ -226,7 +226,6 @@ def train_adios_tme(args):
         mask_model = ADIOSMaskModel(
             num_masks=args.num_masks,
             img_size=224,
-            drop_rate=0.0  # ADIOS doesn't use dropout
         )
     
     # Reconstructor (conditional creation)
