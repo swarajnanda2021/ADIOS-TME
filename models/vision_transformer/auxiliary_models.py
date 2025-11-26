@@ -84,125 +84,88 @@ class TMEHead(nn.Module):
 ###################################################################################################
 
 
-class SpectralNorm:
-    """
-    Spectral Normalization module that constrains the spectral norm 
-    of the weight matrix to be 1. This helps stabilize training by 
-    preventing exploding gradients and maintaining Lipschitz continuity.
-    """
-    def __init__(self, name='weight', n_power_iterations=1, dim=0, eps=1e-12):
-        self.name = name
-        self.dim = dim
-        self.n_power_iterations = n_power_iterations
-        self.eps = eps
+class Conv2DBlock(nn.Module):
+    """Conv2DBlock with convolution followed by GroupNorm, ReLU activation and dropout"""
 
-    def compute_weight(self, module, do_power_iteration=True):
-        weight = getattr(module, self.name + '_orig')
-        weight_mat = weight
-
-        if weight_mat.dim() > 2:
-            weight_mat = weight_mat.reshape(weight_mat.shape[0], -1)
-
-        height = weight_mat.size(0)
-        width = weight_mat.size(1)
-        
-        u = getattr(module, self.name + '_u')
-        v = getattr(module, self.name + '_v')
-
-        if do_power_iteration:
-            with torch.no_grad():
-                for _ in range(self.n_power_iterations):
-                    # Normalize in correct dimensions
-                    v = F.normalize(torch.mv(weight_mat.t(), u), dim=0, eps=self.eps)
-                    u = F.normalize(torch.mv(weight_mat, v), dim=0, eps=self.eps)
-
-        sigma = torch.dot(u, torch.mv(weight_mat, v))
-        weight = weight / sigma
-
-        # Reshape back if needed
-        if weight.dim() != weight_mat.dim():
-            weight = weight.view_as(getattr(module, self.name + '_orig'))
-
-        return weight
-
-    @staticmethod
-    def apply(module, name, n_power_iterations, dim, eps):
-        fn = SpectralNorm(name, n_power_iterations, dim, eps)
-        weight = module._parameters[name]
-        height = weight.size(dim)
-
-        u = F.normalize(weight.new_empty(height).normal_(0, 1), dim=0, eps=fn.eps)
-        v = F.normalize(weight.new_empty(weight.size(0)).normal_(0, 1), dim=0, eps=fn.eps)
-        delattr(module, fn.name)
-        module.register_parameter(fn.name + "_orig", nn.Parameter(weight.data))
-        module.register_buffer(fn.name + "_u", u)
-        module.register_buffer(fn.name + "_v", v)
-
-        module.register_forward_pre_hook(fn)
-        return fn
-
-    def __call__(self, module, input):
-        weight = self.compute_weight(module)
-        setattr(module, self.name, weight)
-
-
-class TMEHead_SpectralNorm(nn.Module):
-    def __init__(self, in_dim, hidden_dim=2048, bottleneck_dim=256, nlayers=3, use_bn=False):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        dropout: float = 0,
+        num_groups: int = 8,
+    ) -> None:
         super().__init__()
-        nlayers = max(nlayers, 1)
-        layers = []
-        
-        # First layer
-        linear = nn.Linear(in_dim, hidden_dim)
-        SpectralNorm.apply(linear, 'weight', n_power_iterations=1, dim=0, eps=1e-12)
-        layers.append(linear)
-        if use_bn:
-            layers.append(nn.BatchNorm1d(hidden_dim))
-        layers.append(nn.GELU())
-        
-        # Middle layers
-        for _ in range(nlayers - 2):
-            linear = nn.Linear(hidden_dim, hidden_dim)
-            SpectralNorm.apply(linear, 'weight', n_power_iterations=1, dim=0, eps=1e-12)
-            layers.append(linear)
-            if use_bn:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.GELU())
-        
-        # Final layer
-        linear = nn.Linear(hidden_dim, bottleneck_dim)
-        SpectralNorm.apply(linear, 'weight', n_power_iterations=1, dim=0, eps=1e-12)
-        layers.append(linear)
-        
-        self.mlp = nn.Sequential(*layers)
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight_orig, std=.02)  # Note: we use weight_orig now
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=((kernel_size - 1) // 2),
+                bias=False,
+            ),
+            nn.GroupNorm(num_groups, out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
 
     def forward(self, x):
-        return self.mlp(x)
+        return self.block(x)
+
+
+class Deconv2DBlock(nn.Module):
+    """Deconvolution block with ConvTranspose2d followed by Conv2d, GroupNorm, ReLU and dropout"""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        dropout: float = 0,
+        num_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=2,
+                stride=2,
+                padding=0,
+                output_padding=0,
+                bias=False,
+            ),
+            nn.Conv2d(
+                in_channels=out_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=((kernel_size - 1) // 2),
+                bias=False,
+            ),
+            nn.GroupNorm(num_groups, out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.block(x)    
 
 
 
 
-class MaskModel_SpectralNorm(nn.Module):
+class MaskModel(nn.Module):
+    """ViT-UNet Mask Model with GroupNorm (single decoder for all masks)."""
+    
     def __init__(self, encoder, num_masks, encoder_dim=768, drop_rate=0.1):
         super().__init__()
-        
+
         self.encoder = encoder
         self.num_masks = num_masks
-        
-        # # Freeze encoder
-        # for parameter in self.encoder.parameters():
-        #     parameter.requires_grad = False
-            
         self.embed_dim = encoder_dim
         self.drop_rate = drop_rate
-        
+
         # Set dimensions based on encoder size
         if self.embed_dim < 512:
             self.skip_dim_11 = 256
@@ -216,8 +179,8 @@ class MaskModel_SpectralNorm(nn.Module):
             self.skip_dim_11 = 768
             self.skip_dim_12 = 384
             self.bottleneck_dim = 768
-            
-        # Shared decoder blocks (without spectral norm yet)
+
+        # Shared decoder blocks
         self.decoder0 = nn.Sequential(
             Conv2DBlock(3, 32, 3, dropout=self.drop_rate),
             Conv2DBlock(32, 64, 3, dropout=self.drop_rate),
@@ -235,124 +198,41 @@ class MaskModel_SpectralNorm(nn.Module):
             Deconv2DBlock(self.embed_dim, self.bottleneck_dim, dropout=self.drop_rate)
         )
 
-        # Separate decoders for each mask
-        self.mask_decoders = nn.ModuleList([
-            self.create_upsampling_branch(1) for _ in range(num_masks)
-        ])
+        # Single decoder for all masks
+        self.mask_decoder = self._create_upsampling_branch(num_masks)
         
-        # Apply spectral norm to all decoders
-        self.apply_spectral_norm_to_decoder(self.decoder0)
-        self.apply_spectral_norm_to_decoder(self.decoder1)
-        self.apply_spectral_norm_to_decoder(self.decoder2)
-        self.apply_spectral_norm_to_decoder(self.decoder3)
-        for decoder in self.mask_decoders:
-            self.apply_spectral_norm_to_decoder(decoder)
-        
-        # Initialize weights AFTER applying spectral norm
-        self.initialize_weights()
+        self._initialize_weights()
 
-    def apply_spectral_norm_to_decoder(self, decoder_module):
-        """
-        Apply PyTorch's spectral normalization to all conv/linear layers in decoder.
-        """
-        for name, module in decoder_module.named_children():
-            if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
-                # Apply PyTorch's spectral normalization
-                spectral_norm(module, name='weight', n_power_iterations=1, eps=1e-12, dim=0)
-            elif isinstance(module, (nn.Sequential, nn.ModuleList)):
-                # Recursively apply to nested modules
-                self.apply_spectral_norm_to_decoder(module)
-    
-    def initialize_weights(self):
-        """
-        Initialize weights, handling spectral norm properly.
-        After spectral_norm is applied, the weight parameter becomes 'weight_orig'
-        """
+    def set_grad_checkpointing(self, enable=True):
+        """Enable or disable gradient checkpointing in the encoder."""
+        if hasattr(self.encoder, 'set_grad_checkpointing'):
+            self.encoder.set_grad_checkpointing(enable)
+
+    def _initialize_weights(self):
+        """Initialize weights with Kaiming for conv layers."""
         def init_fn(m):
-            if isinstance(m, nn.Conv2d):
-                if hasattr(m, 'weight_orig'):  # Has spectral norm
-                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
-                else:
-                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, nn.ConvTranspose2d):
-                if hasattr(m, 'weight_orig'):  # Has spectral norm
-                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
-                else:
-                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-                    
+            elif isinstance(m, nn.GroupNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                if hasattr(m, 'weight_orig'):  # Has spectral norm
-                    nn.init.xavier_normal_(m.weight_orig)
-                else:
-                    nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
-                # Check if the norm layer has learnable parameters
-                if m.weight is not None:
-                    nn.init.constant_(m.weight, 1)
+                nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-        # Initialize shared decoders
         self.decoder0.apply(init_fn)
         self.decoder1.apply(init_fn)
         self.decoder2.apply(init_fn)
         self.decoder3.apply(init_fn)
+        self.mask_decoder.apply(init_fn)
 
-        # Initialize each mask decoder with different seeds for diversity
-        for idx, decoder in enumerate(self.mask_decoders):
-            # Save current RNG state
-            rng_state = torch.get_rng_state()
-            
-            # Set unique seed for this decoder
-            torch.manual_seed(42 + idx * 100)  # Larger separation between seeds
-            
-            # Apply initialization with progressive scaling
-            for module in decoder.modules():
-                if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
-                    scale_factor = 1.0 + (idx * 0.1)  # Progressive scaling
-                    
-                    if hasattr(module, 'weight_orig'):  # Has spectral norm
-                        # Kaiming initialization with custom scale
-                        fan_out = module.weight_orig.size(0) * module.weight_orig[0].numel()
-                        std = np.sqrt(2.0 * scale_factor / fan_out)
-                        nn.init.normal_(module.weight_orig, mean=0, std=std)
-                    else:
-                        fan_out = module.weight.size(0) * module.weight[0].numel()
-                        std = np.sqrt(2.0 * scale_factor / fan_out)
-                        nn.init.normal_(module.weight, mean=0, std=std)
-                    
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, idx * 0.01)
-                        
-                elif isinstance(module, nn.Linear):
-                    if hasattr(module, 'weight_orig'):
-                        nn.init.xavier_normal_(module.weight_orig, gain=1.0 + idx * 0.05)
-                    else:
-                        nn.init.xavier_normal_(module.weight, gain=1.0 + idx * 0.05)
-                    
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, idx * 0.01)
-                        
-                elif isinstance(module, (nn.BatchNorm2d, nn.InstanceNorm2d)):
-                    # Check if the norm layer has learnable parameters
-                    if module.weight is not None:
-                        nn.init.constant_(module.weight, 1.0 + idx * 0.05)
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, idx * 0.01)
-            
-            # Restore RNG state
-            torch.set_rng_state(rng_state)
-
-    def create_upsampling_branch(self, num_classes: int) -> nn.Module:
-        """Create an upsampling branch for mask generation"""
+    def _create_upsampling_branch(self, num_classes: int) -> nn.Module:
+        """Create upsampling branch for mask generation."""
+        from collections import OrderedDict
+        
         bottleneck_upsampler = nn.ConvTranspose2d(
             in_channels=self.embed_dim,
             out_channels=self.bottleneck_dim,
@@ -423,445 +303,6 @@ class MaskModel_SpectralNorm(nn.Module):
                 ("decoder0_header", decoder0_header),
             ])
         )
-    
-    def set_grad_checkpointing(self, enable=True):
-        """Enable or disable gradient checkpointing in the encoder"""
-        if hasattr(self.encoder, 'set_grad_checkpointing'):
-            self.encoder.set_grad_checkpointing(enable)
-            print(f"Gradient checkpointing set to {enable} in MaskModel encoder")
-    
-    def _forward_upsample(
-        self,
-        images: torch.Tensor,
-        f1: torch.Tensor,
-        f2: torch.Tensor,
-        f3: torch.Tensor,
-        f4: torch.Tensor,
-        branch_decoder: nn.Sequential,
-    ) -> torch.Tensor:
-        self.check_tensor_for_nan(images, "images in _forward_upsample")
-        self.check_tensor_for_nan(f1, "f1 in _forward_upsample")
-        self.check_tensor_for_nan(f2, "f2 in _forward_upsample")
-        self.check_tensor_for_nan(f3, "f3 in _forward_upsample")
-        self.check_tensor_for_nan(f4, "f4 in _forward_upsample")
-
-        b4 = branch_decoder.bottleneck_upsampler(f4)
-        self.check_tensor_for_nan(b4, "b4 after bottleneck_upsampler")
-
-        b3 = self.decoder3(f3)
-        self.check_tensor_for_nan(b3, "b3 after decoder3")
-
-        b3 = branch_decoder.decoder3_upsampler(torch.cat([b3, b4], dim=1))
-        self.check_tensor_for_nan(b3, "b3 after decoder3_upsampler")
-
-        b2 = self.decoder2(f2)
-        self.check_tensor_for_nan(b2, "b2 after decoder2")
-
-        b2 = branch_decoder.decoder2_upsampler(torch.cat([b2, b3], dim=1))
-        self.check_tensor_for_nan(b2, "b2 after decoder2_upsampler")
-
-        b1 = self.decoder1(f1)
-        self.check_tensor_for_nan(b1, "b1 after decoder1")
-
-        b1 = branch_decoder.decoder1_upsampler(torch.cat([b1, b2], dim=1))
-        self.check_tensor_for_nan(b1, "b1 after decoder1_upsampler")
-
-        b0 = self.decoder0(images)
-        self.check_tensor_for_nan(b0, "b0 after decoder0")
-
-        branch_output = branch_decoder.decoder0_header(torch.cat([b0, b1], dim=1))
-        self.check_tensor_for_nan(branch_output, "branch_output")
-
-        return branch_output
-        
-    def check_weights_for_nan(self):
-        for name, param in self.named_parameters():
-            if param.requires_grad and torch.isnan(param).any():
-                nan_indices = torch.nonzero(torch.isnan(param), as_tuple=False)
-                raise ValueError(f"NaN detected in trainable weights: {name} at indices: {nan_indices.tolist()}")
-
-    def check_tensor_for_nan(self, tensor, tensor_name):
-        if torch.isnan(tensor).any():
-            nan_indices = torch.nonzero(torch.isnan(tensor), as_tuple=False)
-            raise ValueError(f"NaN detected in {tensor_name} at indices: {nan_indices.tolist()}")
-
-    def forward(self, images):
-        self.check_tensor_for_nan(images, "input images")
-        self.check_weights_for_nan()
-
-        # Get features from encoder
-        features = self.encoder.get_intermediate_layers(images)
-        f1, f2, f3, f4 = features
-        
-        # Reshape features
-        num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
-        feature_size = int(np.sqrt(num_patches))
-        
-        f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
-        f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
-        f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
-        f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
-        
-        
-        
-        # Pre-allocate output tensor
-        batch_size = images.size(0)
-        H, W = images.size(2), images.size(3)
-        all_masks = torch.empty(batch_size, self.num_masks, H, W,
-                               device=images.device, dtype=images.dtype)
-
-        # Process each mask separately
-        mask_outputs = []
-        for decoder in self.mask_decoders:
-            logits = self._forward_upsample(images, f1, f2, f3, f4, decoder)
-            mask_outputs.append(logits)
-            
-        # Concatenate all mask outputs and apply softmax
-        masks = torch.cat(mask_outputs, dim=1)  # [B, N_masks, H, W]
-        masks = torch.softmax(masks, dim=1)
-        
-        return {
-            "masks": masks,  # [B, N_masks, H, W]
-        }
-
-
-class Conv2DBlock(nn.Module): # with batch norms
-    """Conv2DBlock with convolution followed by batch-normalisation, ReLU activation and dropout
-
-    Args:
-        in_channels (int): Number of input channels for convolution
-        out_channels (int): Number of output channels for convolution
-        kernel_size (int, optional): Kernel size for convolution. Defaults to 3.
-        dropout (float, optional): Dropout. Defaults to 0.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int = 3,
-        dropout: float = 0,
-    ) -> None:
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=1,
-                padding=((kernel_size - 1) // 2),
-            ),
-            #nn.BatchNorm2d(out_channels),# avoiding batch norms like the plague since I will be using these for adversarial training.
-            nn.InstanceNorm2d(out_channels),
-            nn.ReLU(True),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class Deconv2DBlock(nn.Module):
-    """Deconvolution block with ConvTranspose2d followed by Conv2d, batch-normalisation, ReLU activation and dropout
-
-    Args:
-        in_channels (int): Number of input channels for deconv block
-        out_channels (int): Number of output channels for deconv and convolution.
-        kernel_size (int, optional): Kernel size for convolution. Defaults to 3.
-        dropout (float, optional): Dropout. Defaults to 0.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int = 3,
-        dropout: float = 0,
-    ) -> None:
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.ConvTranspose2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-            nn.Conv2d(
-                in_channels=out_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=1,
-                padding=((kernel_size - 1) // 2),
-            ),
-            #nn.BatchNorm2d(out_channels),# avoiding batch norms like the plague if using things in an adversarial setup
-            nn.InstanceNorm2d(out_channels),
-            nn.ReLU(True),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-
-
-
-
-class TMEHead(nn.Module):
-    def __init__(self, in_dim, hidden_dim=2048, bottleneck_dim=256, nlayers=3, use_bn=False):
-        super().__init__()
-        nlayers = max(nlayers, 1)
-        layers = []
-
-        # First layer
-        layers.append(nn.Linear(in_dim, hidden_dim))
-        if use_bn:
-            layers.append(nn.BatchNorm1d(hidden_dim))
-        layers.append(nn.GELU())
-
-        # Middle layers
-        for _ in range(nlayers - 2):
-            layers.append(nn.Linear(hidden_dim, hidden_dim))
-            if use_bn:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.GELU())
-
-        # Final layer
-        layers.append(nn.Linear(hidden_dim, bottleneck_dim))
-
-        self.mlp = nn.Sequential(*layers)
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)  # Use weight, not weight_orig
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        return self.mlp(x)
-
-
-
-
-class MaskModel(nn.Module):
-    def __init__(self, encoder, num_masks, encoder_dim=768, drop_rate=0.1):
-        super().__init__()
-
-        self.encoder = encoder
-        self.num_masks = num_masks
-
-        #for parameter in self.encoder.parameters():
-        #    parameter.requires_grad = False
-
-        self.embed_dim = encoder_dim
-        self.drop_rate = drop_rate
-
-        # Set dimensions based on encoder size
-        if self.embed_dim < 512:
-            self.skip_dim_11 = 256
-            self.skip_dim_12 = 128
-            self.bottleneck_dim = 256
-        elif self.embed_dim < 1024:
-            self.skip_dim_11 = 512
-            self.skip_dim_12 = 256
-            self.bottleneck_dim = 512
-        else:
-            # Dimensions for ViT-Large and larger models
-            self.skip_dim_11 = 768
-            self.skip_dim_12 = 384
-            self.bottleneck_dim = 768
-
-        # Shared decoder blocks
-        self.decoder0 = nn.Sequential(
-            Conv2DBlock(3, 32, 3, dropout=self.drop_rate),
-            Conv2DBlock(32, 64, 3, dropout=self.drop_rate),
-        )
-        self.decoder1 = nn.Sequential(
-            Deconv2DBlock(self.embed_dim, self.skip_dim_11, dropout=self.drop_rate),
-            Deconv2DBlock(self.skip_dim_11, self.skip_dim_12, dropout=self.drop_rate),
-            Deconv2DBlock(self.skip_dim_12, 128, dropout=self.drop_rate),
-        )
-        self.decoder2 = nn.Sequential(
-            Deconv2DBlock(self.embed_dim, self.skip_dim_11, dropout=self.drop_rate),
-            Deconv2DBlock(self.skip_dim_11, 256, dropout=self.drop_rate),
-        )
-        self.decoder3 = nn.Sequential(
-            Deconv2DBlock(self.embed_dim, self.bottleneck_dim, dropout=self.drop_rate)
-        )
-
-        # Single decoder for all masks
-        self.mask_decoder = self.create_upsampling_branch(num_masks)
-        
-
-        self.initialize_weights()
-
-    def set_grad_checkpointing(self, enable=True):
-        """Enable or disable gradient checkpointing in the encoder"""
-        if hasattr(self.encoder, 'set_grad_checkpointing'):
-            self.encoder.set_grad_checkpointing(enable)
-            print(f"Gradient checkpointing set to {enable} in MaskModel encoder")
-        else:
-            print("Warning: MaskModel encoder does not support gradient checkpointing")
-
-
-    def initialize_weights(self):
-        """
-        Initialize weights, handling spectral norm properly.
-        After spectral_norm is applied, the weight parameter becomes 'weight_orig'
-        """
-        def init_fn(m):
-            if isinstance(m, nn.Conv2d):
-                if hasattr(m, 'weight_orig'):  # Has spectral norm
-                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
-                else:
-                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, nn.ConvTranspose2d):
-                if hasattr(m, 'weight_orig'):  # Has spectral norm
-                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
-                else:
-                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, nn.Linear):
-                if hasattr(m, 'weight_orig'):  # Has spectral norm
-                    nn.init.xavier_normal_(m.weight_orig)
-                else:
-                    nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
-                # Check if the norm layer has learnable parameters
-                if m.weight is not None:
-                    nn.init.constant_(m.weight, 1)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-        # Initialize shared decoders
-        self.decoder0.apply(init_fn)
-        self.decoder1.apply(init_fn)
-        self.decoder2.apply(init_fn)
-        self.decoder3.apply(init_fn)
-
-        # Save current RNG state
-        rng_state = torch.get_rng_state()
-        
-        # Set unique seed for this decoder
-        torch.manual_seed(42 + idx * 100)  # Larger separation between seeds
-        
-        # Apply initialization with progressive scaling
-        for module in self.mask_decoder.modules():
-            if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
-                scale_factor = 1.0 + (idx * 0.1)  # Progressive scaling
-                
-                if hasattr(module, 'weight_orig'):  # Has spectral norm
-                    # Kaiming initialization with custom scale
-                    fan_out = module.weight_orig.size(0) * module.weight_orig[0].numel()
-                    std = np.sqrt(2.0 * scale_factor / fan_out)
-                    nn.init.normal_(module.weight_orig, mean=0, std=std)
-                else:
-                    fan_out = module.weight.size(0) * module.weight[0].numel()
-                    std = np.sqrt(2.0 * scale_factor / fan_out)
-                    nn.init.normal_(module.weight, mean=0, std=std)
-                
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, idx * 0.01)
-                    
-            elif isinstance(module, nn.Linear):
-                if hasattr(module, 'weight_orig'):
-                    nn.init.xavier_normal_(module.weight_orig, gain=1.0 + idx * 0.05)
-                else:
-                    nn.init.xavier_normal_(module.weight, gain=1.0 + idx * 0.05)
-                
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, idx * 0.01)
-                    
-            elif isinstance(module, (nn.BatchNorm2d, nn.InstanceNorm2d)):
-                # Check if the norm layer has learnable parameters
-                if module.weight is not None:
-                    nn.init.constant_(module.weight, 1.0 + idx * 0.05)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, idx * 0.01)
-        
-            # Restore RNG state
-            torch.set_rng_state(rng_state)
-
-    def create_upsampling_branch(self, num_classes: int) -> nn.Module:
-        bottleneck_upsampler = nn.ConvTranspose2d(
-            in_channels=self.embed_dim,
-            out_channels=self.bottleneck_dim,
-            kernel_size=2,
-            stride=2,
-            padding=0,
-            output_padding=0,
-        )
-        decoder3_upsampler = nn.Sequential(
-            Conv2DBlock(self.bottleneck_dim * 2, self.bottleneck_dim, dropout=self.drop_rate),
-            Conv2DBlock(self.bottleneck_dim, self.bottleneck_dim, dropout=self.drop_rate),
-            Conv2DBlock(self.bottleneck_dim, self.bottleneck_dim, dropout=self.drop_rate),
-            nn.ConvTranspose2d(
-                in_channels=self.bottleneck_dim,
-                out_channels=256,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-        )
-        decoder2_upsampler = nn.Sequential(
-            Conv2DBlock(256 * 2, 256, dropout=self.drop_rate),
-            Conv2DBlock(256, 256, dropout=self.drop_rate),
-            nn.ConvTranspose2d(
-                in_channels=256,
-                out_channels=128,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-        )
-        decoder1_upsampler = nn.Sequential(
-            Conv2DBlock(128 * 2, 128, dropout=self.drop_rate),
-            Conv2DBlock(128, 128, dropout=self.drop_rate),
-            nn.ConvTranspose2d(
-                in_channels=128,
-                out_channels=64,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-        )
-        decoder0_header = nn.Sequential(
-            Conv2DBlock(64 * 2, 64, dropout=self.drop_rate),
-            Conv2DBlock(64, 64, dropout=self.drop_rate),
-            nn.Conv2d(
-                in_channels=64,
-                out_channels=num_classes,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-            ),
-
-        )
-
-        return nn.Sequential(
-            OrderedDict(
-                [
-                    ("bottleneck_upsampler", bottleneck_upsampler),
-                    ("decoder3_upsampler", decoder3_upsampler),
-                    ("decoder2_upsampler", decoder2_upsampler),
-                    ("decoder1_upsampler", decoder1_upsampler),
-                    ("decoder0_header", decoder0_header),
-                ]
-            )
-        )
 
     def _forward_upsample(
         self,
@@ -870,481 +311,40 @@ class MaskModel(nn.Module):
         f2: torch.Tensor,
         f3: torch.Tensor,
         f4: torch.Tensor,
-        branch_decoder: nn.Sequential,
     ) -> torch.Tensor:
-        self.check_tensor_for_nan(images, "images in _forward_upsample")
-        self.check_tensor_for_nan(f1, "f1 in _forward_upsample")
-        self.check_tensor_for_nan(f2, "f2 in _forward_upsample")
-        self.check_tensor_for_nan(f3, "f3 in _forward_upsample")
-        self.check_tensor_for_nan(f4, "f4 in _forward_upsample")
-
-        b4 = branch_decoder.bottleneck_upsampler(f4)
-        self.check_tensor_for_nan(b4, "b4 after bottleneck_upsampler")
-
+        """Forward through decoder with skip connections."""
+        b4 = self.mask_decoder.bottleneck_upsampler(f4)
         b3 = self.decoder3(f3)
-        self.check_tensor_for_nan(b3, "b3 after decoder3")
-
-        b3 = branch_decoder.decoder3_upsampler(torch.cat([b3, b4], dim=1))
-        self.check_tensor_for_nan(b3, "b3 after decoder3_upsampler")
-
+        b3 = self.mask_decoder.decoder3_upsampler(torch.cat([b3, b4], dim=1))
+        
         b2 = self.decoder2(f2)
-        self.check_tensor_for_nan(b2, "b2 after decoder2")
-
-        b2 = branch_decoder.decoder2_upsampler(torch.cat([b2, b3], dim=1))
-        self.check_tensor_for_nan(b2, "b2 after decoder2_upsampler")
-
+        b2 = self.mask_decoder.decoder2_upsampler(torch.cat([b2, b3], dim=1))
+        
         b1 = self.decoder1(f1)
-        self.check_tensor_for_nan(b1, "b1 after decoder1")
-
-        b1 = branch_decoder.decoder1_upsampler(torch.cat([b1, b2], dim=1))
-        self.check_tensor_for_nan(b1, "b1 after decoder1_upsampler")
-
+        b1 = self.mask_decoder.decoder1_upsampler(torch.cat([b1, b2], dim=1))
+        
         b0 = self.decoder0(images)
-        self.check_tensor_for_nan(b0, "b0 after decoder0")
-
-        branch_output = branch_decoder.decoder0_header(torch.cat([b0, b1], dim=1))
-        self.check_tensor_for_nan(branch_output, "branch_output")
-
-        return branch_output
-
-    def check_weights_for_nan(self):
-        for name, param in self.named_parameters():
-            if param.requires_grad and torch.isnan(param).any():
-                nan_indices = torch.nonzero(torch.isnan(param), as_tuple=False)
-                raise ValueError(f"NaN detected in trainable weights: {name} at indices: {nan_indices.tolist()}")
-
-    def check_tensor_for_nan(self, tensor, tensor_name):
-        if torch.isnan(tensor).any():
-            nan_indices = torch.nonzero(torch.isnan(tensor), as_tuple=False)
-            raise ValueError(f"NaN detected in {tensor_name} at indices: {nan_indices.tolist()}")
+        output = self.mask_decoder.decoder0_header(torch.cat([b0, b1], dim=1))
+        
+        return output
 
     def forward(self, images):
-        self.check_tensor_for_nan(images, "input images")
-        self.check_weights_for_nan()
-
+        """Forward pass generating soft masks."""
         # Get features from encoder
         features = self.encoder.get_intermediate_layers(images)
         f1, f2, f3, f4 = features
 
-        # Reshape features
-        num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
+        # Reshape features from [B, N, D] to [B, D, H, W]
+        num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens + 1 cls token
         feature_size = int(np.sqrt(num_patches))
 
-        f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
-        f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
-        f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
-        f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
+        f1 = f1[:, 5:, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
+        f2 = f2[:, 5:, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
+        f3 = f3[:, 5:, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
+        f4 = f4[:, 5:, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
 
-
-        # Single forward pass
-        logits = self._forward_upsample(images, f1, f2, f3, f4, self.mask_decoder)
+        # Single forward pass through decoder
+        logits = self._forward_upsample(images, f1, f2, f3, f4)
         masks = torch.softmax(logits, dim=1)
 
-        
-        return {
-            "masks": masks,  # [B, N_masks, H, W]
-        }
-
-
-
-
-
-
-
-class ReconstructorModel(nn.Module):
-    def __init__(self, encoder, encoder_dim=768, drop_rate=0.1):
-        super().__init__()
-
-        self.encoder = encoder
-
-        self.embed_dim = encoder_dim
-        self.drop_rate = drop_rate
-
-        # Set dimensions based on encoder size
-        if self.embed_dim < 512:
-            self.skip_dim_11 = 256
-            self.skip_dim_12 = 128
-            self.bottleneck_dim = 256
-        elif self.embed_dim < 1024:
-            self.skip_dim_11 = 512
-            self.skip_dim_12 = 256
-            self.bottleneck_dim = 512
-        else:
-            # Dimensions for ViT-Large and larger models
-            self.skip_dim_11 = 768
-            self.skip_dim_12 = 384
-            self.bottleneck_dim = 768
-
-        # Shared decoder blocks
-        self.decoder0 = nn.Sequential(
-            Conv2DBlock(3, 32, 3, dropout=self.drop_rate),
-            Conv2DBlock(32, 64, 3, dropout=self.drop_rate),
-        )
-        self.decoder1 = nn.Sequential(
-            Deconv2DBlock(self.embed_dim, self.skip_dim_11, dropout=self.drop_rate),
-            Deconv2DBlock(self.skip_dim_11, self.skip_dim_12, dropout=self.drop_rate),
-            Deconv2DBlock(self.skip_dim_12, 128, dropout=self.drop_rate),
-        )
-        self.decoder2 = nn.Sequential(
-            Deconv2DBlock(self.embed_dim, self.skip_dim_11, dropout=self.drop_rate),
-            Deconv2DBlock(self.skip_dim_11, 256, dropout=self.drop_rate),
-        )
-        self.decoder3 = nn.Sequential(
-            Deconv2DBlock(self.embed_dim, self.bottleneck_dim, dropout=self.drop_rate)
-        )
-
-        # Single decoder for all masks
-        self.image_decoder = self.create_upsampling_branch(3)
-        
-        self.apply_spectral_norm_to_decoder(self.image_decoder)
-        self.initialize_weights()
-
-    def set_grad_checkpointing(self, enable=True):
-        """Enable or disable gradient checkpointing in the encoder"""
-        if hasattr(self.encoder, 'set_grad_checkpointing'):
-            self.encoder.set_grad_checkpointing(enable)
-            print(f"Gradient checkpointing set to {enable} in MaskModel encoder")
-        else:
-            print("Warning: MaskModel encoder does not support gradient checkpointing")
-
-
-    def apply_spectral_norm_to_decoder(self,decoder_module):
-        """
-        Applies spectral normalization to all convolutional and linear layers in a decoder module,
-        excluding batch norm and activation functions.
-        """
-        for name, module in decoder_module.named_children():
-            if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
-                SpectralNorm.apply(module, 'weight', n_power_iterations=1, dim=0, eps=1e-12)
-            elif isinstance(module, nn.Sequential):
-                self.apply_spectral_norm_to_decoder(module)
-
-    def initialize_weights(self):
-        def init_fn(m):
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                # Check if spectral norm has been applied (weight_orig exists)
-                if hasattr(m, 'weight_orig'):
-                    nn.init.kaiming_normal_(m.weight_orig, mode='fan_out', nonlinearity='relu')
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-                else:
-                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                # Check if spectral norm has been applied
-                if hasattr(m, 'weight_orig'):
-                    nn.init.xavier_normal_(m.weight_orig)
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-                else:
-                    nn.init.xavier_normal_(m.weight)
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-
-        # Apply initialization to all modules (including Deconv2DBlock)
-        self.apply(init_fn)
-
-    def create_upsampling_branch(self, num_classes: int) -> nn.Module:
-        bottleneck_upsampler = nn.ConvTranspose2d(
-            in_channels=self.embed_dim,
-            out_channels=self.bottleneck_dim,
-            kernel_size=2,
-            stride=2,
-            padding=0,
-            output_padding=0,
-        )
-        decoder3_upsampler = nn.Sequential(
-            Conv2DBlock(self.bottleneck_dim * 2, self.bottleneck_dim, dropout=self.drop_rate),
-            Conv2DBlock(self.bottleneck_dim, self.bottleneck_dim, dropout=self.drop_rate),
-            Conv2DBlock(self.bottleneck_dim, self.bottleneck_dim, dropout=self.drop_rate),
-            nn.ConvTranspose2d(
-                in_channels=self.bottleneck_dim,
-                out_channels=256,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-        )
-        decoder2_upsampler = nn.Sequential(
-            Conv2DBlock(256 * 2, 256, dropout=self.drop_rate),
-            Conv2DBlock(256, 256, dropout=self.drop_rate),
-            nn.ConvTranspose2d(
-                in_channels=256,
-                out_channels=128,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-        )
-        decoder1_upsampler = nn.Sequential(
-            Conv2DBlock(128 * 2, 128, dropout=self.drop_rate),
-            Conv2DBlock(128, 128, dropout=self.drop_rate),
-            nn.ConvTranspose2d(
-                in_channels=128,
-                out_channels=64,
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                output_padding=0,
-            ),
-        )
-        decoder0_header = nn.Sequential(
-            Conv2DBlock(64 * 2, 64, dropout=self.drop_rate),
-            Conv2DBlock(64, 64, dropout=self.drop_rate),
-            nn.Conv2d(
-                in_channels=64,
-                out_channels=num_classes,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-            ),
-
-        )
-
-        return nn.Sequential(
-            OrderedDict(
-                [
-                    ("bottleneck_upsampler", bottleneck_upsampler),
-                    ("decoder3_upsampler", decoder3_upsampler),
-                    ("decoder2_upsampler", decoder2_upsampler),
-                    ("decoder1_upsampler", decoder1_upsampler),
-                    ("decoder0_header", decoder0_header),
-                ]
-            )
-        )
-
-    def _forward_upsample(
-        self,
-        images: torch.Tensor,
-        f1: torch.Tensor,
-        f2: torch.Tensor,
-        f3: torch.Tensor,
-        f4: torch.Tensor,
-        branch_decoder: nn.Sequential,
-    ) -> torch.Tensor:
-        self.check_tensor_for_nan(images, "images in _forward_upsample")
-        self.check_tensor_for_nan(f1, "f1 in _forward_upsample")
-        self.check_tensor_for_nan(f2, "f2 in _forward_upsample")
-        self.check_tensor_for_nan(f3, "f3 in _forward_upsample")
-        self.check_tensor_for_nan(f4, "f4 in _forward_upsample")
-
-        b4 = branch_decoder.bottleneck_upsampler(f4)
-        self.check_tensor_for_nan(b4, "b4 after bottleneck_upsampler")
-
-        b3 = self.decoder3(f3)
-        self.check_tensor_for_nan(b3, "b3 after decoder3")
-
-        b3 = branch_decoder.decoder3_upsampler(torch.cat([b3, b4], dim=1))
-        self.check_tensor_for_nan(b3, "b3 after decoder3_upsampler")
-
-        b2 = self.decoder2(f2)
-        self.check_tensor_for_nan(b2, "b2 after decoder2")
-
-        b2 = branch_decoder.decoder2_upsampler(torch.cat([b2, b3], dim=1))
-        self.check_tensor_for_nan(b2, "b2 after decoder2_upsampler")
-
-        b1 = self.decoder1(f1)
-        self.check_tensor_for_nan(b1, "b1 after decoder1")
-
-        b1 = branch_decoder.decoder1_upsampler(torch.cat([b1, b2], dim=1))
-        self.check_tensor_for_nan(b1, "b1 after decoder1_upsampler")
-
-        b0 = self.decoder0(images)
-        self.check_tensor_for_nan(b0, "b0 after decoder0")
-
-        branch_output = branch_decoder.decoder0_header(torch.cat([b0, b1], dim=1))
-        self.check_tensor_for_nan(branch_output, "branch_output")
-
-        return branch_output
-
-    def check_weights_for_nan(self):
-        for name, param in self.named_parameters():
-            if param.requires_grad and torch.isnan(param).any():
-                nan_indices = torch.nonzero(torch.isnan(param), as_tuple=False)
-                raise ValueError(f"NaN detected in trainable weights: {name} at indices: {nan_indices.tolist()}")
-
-    def check_tensor_for_nan(self, tensor, tensor_name):
-        if torch.isnan(tensor).any():
-            nan_indices = torch.nonzero(torch.isnan(tensor), as_tuple=False)
-            raise ValueError(f"NaN detected in {tensor_name} at indices: {nan_indices.tolist()}")
-
-    def forward(self, masks):
-        self.check_tensor_for_nan(masks, "input images")
-        self.check_weights_for_nan()
-
-        with torch.no_grad():
-            # Get features from encoder
-            features = self.encoder.get_intermediate_layers(masks)
-            f1, f2, f3, f4 = features
-
-            # Reshape features
-            num_patches = f1.shape[1] - (4 + 1)  # 4 register tokens plus cls token
-            feature_size = int(np.sqrt(num_patches))
-
-            f1 = f1[:, (4+1):, :].permute(0, 2, 1).view(f1.shape[0], -1, feature_size, feature_size).contiguous()
-            f2 = f2[:, (4+1):, :].permute(0, 2, 1).view(f2.shape[0], -1, feature_size, feature_size).contiguous()
-            f3 = f3[:, (4+1):, :].permute(0, 2, 1).view(f3.shape[0], -1, feature_size, feature_size).contiguous()
-            f4 = f4[:, (4+1):, :].permute(0, 2, 1).view(f4.shape[0], -1, feature_size, feature_size).contiguous()
-
-
-
-        # Output RGB image
-        reconstructed = self._forward_upsample(masks, f1, f2, f3, f4, self.image_decoder)
-        return torch.tanh(reconstructed) 
-
-
-
-
-# ===== ADIOS UNet without skip connections ===== #
-
-
-class ADIOSMaskModel(nn.Module):
-    """
-    ADIOS mask model - simple U-Net operating on RGB images.
-    Based on: Shi et al., "Adversarial Masking for Self-Supervised Learning", ICML 2022
-    
-    Key differences from our approach:
-    - Operates on RGB images directly (not ViT features)
-    - Uses GroupNorm instead of InstanceNorm
-    - Simpler architecture without skip connections to encoder features
-    - Pixel-wise softmax across masks
-    """
-    def __init__(self, num_masks=3, img_size=224, drop_rate=0.0):
-        super().__init__()
-        
-        self.num_masks = num_masks
-        self.img_size = img_size
-        
-        # Down blocks (5 blocks as per ADIOS Table 8)
-        # Note: ADIOS doesn't use downsampling - keeps full resolution
-        self.down1 = nn.Sequential(
-            nn.Conv2d(3, 8, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(4, 8),  # 4 groups for 8 channels
-            nn.ReLU(inplace=True)
-        )
-        self.down2 = nn.Sequential(
-            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(4, 8),
-            nn.ReLU(inplace=True)
-        )
-        self.down3 = nn.Sequential(
-            nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(8, 16),  # 8 groups for 16 channels
-            nn.ReLU(inplace=True)
-        )
-        self.down4 = nn.Sequential(
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(8, 16),
-            nn.ReLU(inplace=True)
-        )
-        self.down5 = nn.Sequential(
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(8, 16),
-            nn.ReLU(inplace=True)
-        )
-        
-        # MLP (bottleneck)
-        # Calculate flattened size: 16 channels * img_size * img_size
-        flattened_size = 16 * img_size * img_size
-        self.mlp = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(flattened_size, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 256),
-            nn.ReLU(inplace=True),
-            # Expand back
-            nn.Linear(256, flattened_size),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Up blocks (5 blocks, mirror of down)
-        self.up1 = nn.Sequential(
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(8, 16),
-            nn.ReLU(inplace=True)
-        )
-        self.up2 = nn.Sequential(
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(8, 16),
-            nn.ReLU(inplace=True)
-        )
-        self.up3 = nn.Sequential(
-            nn.Conv2d(16, 8, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(4, 8),
-            nn.ReLU(inplace=True)
-        )
-        self.up4 = nn.Sequential(
-            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(4, 8),
-            nn.ReLU(inplace=True)
-        )
-        self.up5 = nn.Sequential(
-            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(4, 8),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Final occlusion head: 1x1 conv to produce N masks
-        self.occlusion_head = nn.Conv2d(8, num_masks, kernel_size=1, stride=1, padding=0)
-        
-        # Initialize weights
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.GroupNorm):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-    
-    def forward(self, images):
-        """
-        Args:
-            images: RGB images [B, 3, H, W]
-            
-        Returns:
-            dict with 'masks': [B, num_masks, H, W] with pixel-wise softmax
-        """
-        B, C, H, W = images.shape
-        
-        # Down path
-        x = self.down1(images)
-        x = self.down2(x)
-        x = self.down3(x)
-        x = self.down4(x)
-        x = self.down5(x)
-        
-        # MLP bottleneck
-        x_flat = self.mlp(x)
-        x = x_flat.view(B, 16, H, W)
-        
-        # Up path
-        x = self.up1(x)
-        x = self.up2(x)
-        x = self.up3(x)
-        x = self.up4(x)
-        x = self.up5(x)
-        
-        # Occlusion head
-        logits = self.occlusion_head(x)  # [B, num_masks, H, W]
-        
-        # Pixel-wise softmax across masks (crucial for ADIOS)
-        masks = F.softmax(logits, dim=1)  # Sum to 1 across masks for each pixel
-        
-        return {
-            "masks": masks,  # [B, num_masks, H, W]
-        }
+        return {"masks": masks}

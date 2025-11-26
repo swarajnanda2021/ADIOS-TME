@@ -89,13 +89,6 @@ def main():
     mask_encoder_checkpoint = None  # <vit_unet preset> '/data1/vanderbc/nandas1/TCGA_Dinov2_ViT-B_run2/logs/checkpoint.pth'
     freeze_mask_encoder = False  # <vit_unet preset> True
 
-    # ========== Reconstructor Configuration ==========
-    use_reconstructor = False  # <vit_unet preset> True
-    reconstructor_encoder_dim = 192  # <vit_unet preset> 384
-    reconstructor_encoder_depth = 12
-    beta_reconstruction = 1.0
-    reconstructor_update_freq = 1
-
     # ========== ADIOS Loss Configuration ==========
     sparsity_penalty_type = 'inverse_sin'  # <vit_unet preset> 'sinh_squared'
     alpha_sparsity = 0.1
@@ -159,12 +152,6 @@ def main():
         mask_encoder_depth=mask_encoder_depth,
         mask_encoder_checkpoint=mask_encoder_checkpoint,
         freeze_mask_encoder=freeze_mask_encoder,
-        # Reconstructor
-        use_reconstructor=use_reconstructor,
-        reconstructor_encoder_dim=reconstructor_encoder_dim,
-        reconstructor_encoder_depth=reconstructor_encoder_depth,
-        beta_reconstruction=beta_reconstruction,
-        reconstructor_update_freq=reconstructor_update_freq,
         # Loss
         sparsity_penalty_type=sparsity_penalty_type,
         alpha_sparsity=alpha_sparsity,
