@@ -38,8 +38,8 @@ def get_args_parser():
     
     # ========== Mask Model ==========
     parser.add_argument('--mask_model_type', default='vit_unet', type=str,
-                    choices=['vit_unet', 'adios'],
-
+                        choices=['vit_unet', 'adios'],
+                        help='Mask model type: vit_unet (yours) or adios (YugeTen)')
     parser.add_argument('--num_masks', default=3, type=int,
                         help='Number of semantic masks to generate')
     parser.add_argument('--crops_per_mask', default=1, type=int,
@@ -54,7 +54,7 @@ def get_args_parser():
                         help='Dropout rate in mask decoder')
     # In case you don't want to train the backbone
     parser.add_argument('--mask_encoder_checkpoint', default=None, type=str,
-                    help='Path to checkpoint containing pretrained encoder for mask model (student.module.backbone)')
+                        help='Path to checkpoint containing pretrained encoder for mask model (student.module.backbone)')
     parser.add_argument('--freeze_mask_encoder', default=True, type=utils.bool_flag,
                         help='Whether to freeze mask encoder after loading from checkpoint')
     
@@ -72,8 +72,8 @@ def get_args_parser():
     
     # ========== ADIOS Loss ==========
     parser.add_argument('--sparsity_penalty_type', type=str, default='inverse_sin',
-                    choices=['inverse_sin', 'sinh_squared'],
-                    help='Type of sparsity penalty: inverse_sin (YugeTen) or sinh_squared (yours)')
+                        choices=['inverse_sin', 'sinh_squared'],
+                        help='Type of sparsity penalty: inverse_sin (YugeTen) or sinh_squared (yours)')
     parser.add_argument('--alpha_sparsity', default=0.1, type=float,
                         help='Weight for sparsity penalty on masks')
     parser.add_argument('--initial_temp', default=0.2, type=float,
@@ -82,6 +82,21 @@ def get_args_parser():
                         help='Final temperature for contrastive loss')
     parser.add_argument('--reconstruction_weight', default=0.1, type=float,
                         help='Weight for reconstruction reward')
+    
+    # ========== Optimizer ==========
+    parser.add_argument('--optimizer_type', default='adamw', type=str,
+                        choices=['adamw', 'sgd'],
+                        help='Optimizer type: adamw or sgd (ADIOS uses sgd)')
+    parser.add_argument('--use_lars', default=False, type=utils.bool_flag,
+                        help='Use LARS wrapper (recommended with SGD for ADIOS)')
+    parser.add_argument('--lars_eta', default=0.02, type=float,
+                        help='LARS eta parameter')
+    parser.add_argument('--momentum', default=0.9, type=float,
+                        help='Momentum for SGD optimizer')
+    parser.add_argument('--exclude_bias_n_norm_lars', default=True, type=utils.bool_flag,
+                        help='Exclude bias and norm from LARS adaptation')
+    parser.add_argument('--mask_lr_ratio', default=0.25, type=float,
+                        help='Mask model LR as ratio of student LR (ADIOS uses 0.25)')
     
     # ========== Training ==========
     parser.add_argument('--batch_size_per_gpu', default=64, type=int,
@@ -120,7 +135,7 @@ def get_args_parser():
     parser.add_argument('--log_freq', default=10, type=int,
                         help='Log metrics every N iterations')
     parser.add_argument('--viz_freq', default=500, type=int,
-                    help='Visualize masks every N iterations')
+                        help='Visualize masks every N iterations')
     
     # ========== Distributed ==========
     parser.add_argument('--world_size', default=1, type=int,

@@ -7,6 +7,7 @@ Key optimizations:
 3. Multi-crop implementation
 4. Batched forward passes
 5. Memory-efficient crop processing
+6. SGD + LARS support for faithful ADIOS replication
 """
 
 import os
@@ -36,6 +37,116 @@ from .helpers import (
     apply_crops_to_masked_images,
     process_student_with_cached_masks_and_crops,
 )
+from .lars import LARSWrapper
+
+
+def create_optimizers(args, student, mask_model, reconstructor=None):
+    """
+    Create optimizers based on configuration.
+    
+    Supports:
+    - AdamW (default, your approach)
+    - SGD + LARS (ADIOS paper approach)
+    
+    Args:
+        args: Configuration arguments
+        student: Student model
+        mask_model: Mask model
+        reconstructor: Optional reconstructor model
+    
+    Returns:
+        Tuple of (student_optimizer, mask_optimizer, reconstructor_optimizer or None)
+    """
+    # Calculate mask learning rate
+    mask_lr = args.lr * args.mask_lr_ratio
+    
+    print(f"Creating optimizers:")
+    print(f"  Type: {args.optimizer_type}")
+    print(f"  Student LR: {args.lr}")
+    print(f"  Mask LR: {mask_lr} (ratio: {args.mask_lr_ratio})")
+    print(f"  Weight decay: {args.weight_decay}")
+    if args.optimizer_type == 'sgd':
+        print(f"  Momentum: {args.momentum}")
+        print(f"  LARS: {args.use_lars}")
+        if args.use_lars:
+            print(f"  LARS eta: {args.lars_eta}")
+    
+    if args.optimizer_type == 'sgd':
+        # SGD with momentum (ADIOS paper approach)
+        student_optimizer = torch.optim.SGD(
+            student.parameters(),
+            lr=args.lr,
+            momentum=args.momentum,
+            weight_decay=args.weight_decay
+        )
+        
+        mask_optimizer = torch.optim.SGD(
+            mask_model.parameters(),
+            lr=mask_lr,
+            momentum=args.momentum,
+            weight_decay=args.weight_decay
+        )
+        
+        # Wrap with LARS if enabled
+        if args.use_lars:
+            student_optimizer = LARSWrapper(
+                student_optimizer,
+                eta=args.lars_eta,
+                clip=True,
+                exclude_bias_n_norm=args.exclude_bias_n_norm_lars
+            )
+            mask_optimizer = LARSWrapper(
+                mask_optimizer,
+                eta=args.lars_eta,
+                clip=True,
+                exclude_bias_n_norm=args.exclude_bias_n_norm_lars
+            )
+            print("  Applied LARS wrapper to optimizers")
+        
+        # Reconstructor optimizer (if used)
+        reconstructor_optimizer = None
+        if reconstructor is not None:
+            reconstructor_optimizer = torch.optim.SGD(
+                reconstructor.parameters(),
+                lr=mask_lr,  # Same as mask model
+                momentum=args.momentum,
+                weight_decay=args.weight_decay
+            )
+            if args.use_lars:
+                reconstructor_optimizer = LARSWrapper(
+                    reconstructor_optimizer,
+                    eta=args.lars_eta,
+                    clip=True,
+                    exclude_bias_n_norm=args.exclude_bias_n_norm_lars
+                )
+    
+    elif args.optimizer_type == 'adamw':
+        # AdamW (your current approach)
+        student_optimizer = torch.optim.AdamW(
+            student.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay
+        )
+        
+        mask_optimizer = torch.optim.AdamW(
+            mask_model.parameters(),
+            lr=mask_lr,
+            weight_decay=args.weight_decay
+        )
+        
+        # Reconstructor optimizer (if used)
+        reconstructor_optimizer = None
+        if reconstructor is not None:
+            reconstructor_optimizer = torch.optim.AdamW(
+                reconstructor.parameters(),
+                lr=mask_lr,
+                weight_decay=args.weight_decay
+            )
+    
+    else:
+        raise ValueError(f"Unknown optimizer type: {args.optimizer_type}")
+    
+    return student_optimizer, mask_optimizer, reconstructor_optimizer
 
 
 def train_adios_tme(args):
@@ -120,7 +231,6 @@ def train_adios_tme(args):
     
     # Reconstructor (conditional creation)
     reconstructor = None
-    reconstructor_optimizer = None
     
     if args.use_reconstructor:
         print("Creating reconstructor model")
@@ -144,12 +254,6 @@ def train_adios_tme(args):
         reconstructor = reconstructor.cuda()
         reconstructor = setup_ddp_model(reconstructor, args, find_unused=False)
         reconstructor._set_static_graph()
-        
-        reconstructor_optimizer = torch.optim.AdamW(
-            reconstructor.parameters(),
-            lr=args.lr * 0.25, # Adopting YugeTen's original 1:4 learning rate
-            weight_decay=args.weight_decay
-        )
     else:
         print("Skipping reconstructor (pure ADIOS method)")
     
@@ -165,23 +269,15 @@ def train_adios_tme(args):
     
     # ============ Create loss ============
     adios_loss = ADIOSLoss(
-        alpha_sparsity=0.1,
+        alpha_sparsity=args.alpha_sparsity,
         img_size=224,
         temperature=0.1,  # Fixed temperature (no schedule)
         sparsity_penalty_type=args.sparsity_penalty_type,
     ).cuda()
     
     # ============ Create optimizers ============
-    student_optimizer = torch.optim.AdamW(
-        student.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
-    
-    mask_optimizer = torch.optim.AdamW(
-        mask_model.parameters(),
-        lr=args.lr * 0.25, # Adopting YugeTen's original 1:4 learning rate
-        weight_decay=args.weight_decay
+    student_optimizer, mask_optimizer, reconstructor_optimizer = create_optimizers(
+        args, student, mask_model, reconstructor
     )
 
     lr_schedule = utils.cosine_scheduler(
@@ -259,6 +355,11 @@ def train_adios_tme(args):
         # Update learning rate
         for param_group in student_optimizer.param_groups:
             param_group['lr'] = lr_schedule[iteration]
+        
+        # Scale mask optimizer LR proportionally
+        mask_lr = lr_schedule[iteration] * args.mask_lr_ratio
+        for param_group in mask_optimizer.param_groups:
+            param_group['lr'] = mask_lr
         
         # ============ Cache masks once per iteration ============
         mask_model.eval()

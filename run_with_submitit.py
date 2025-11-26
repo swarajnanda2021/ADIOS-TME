@@ -10,36 +10,11 @@ from pathlib import Path
 
 import submitit
 
-from configs.config import get_args_parser
 from training.trainer import train_adios_tme
-
-
-def parse_args():
-    """Parse submitit and training arguments."""
-    parser = argparse.ArgumentParser(
-        "Submitit for ADIOS-TME", 
-        parents=[get_args_parser()]
-    )
-    
-    # Submitit specific arguments
-    parser.add_argument("--ngpus", default=4, type=int, 
-                        help="Number of GPUs per node")
-    parser.add_argument("--nodes", default=1, type=int, 
-                        help="Number of nodes")
-    parser.add_argument("--timeout", default=10000, type=int, 
-                        help="Job duration in minutes")
-    parser.add_argument("--partition", default="vanderbc_gpu", type=str, 
-                        help="Partition name")
-    parser.add_argument("--constraint", default="h100", type=str,
-                        help="GPU constraint (a100, h100, etc)")
-    
-    return parser.parse_args()
 
 
 def get_shared_folder() -> Path:
     """Get shared folder for logs and checkpoints."""
-    user = os.environ.get('USER', 'user')
-    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     p = Path(f"/data1/vanderbc/nandas1/ADIOS-TME/logs")
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -82,114 +57,186 @@ class Trainer(object):
 
 def main():
     """Main submitit launcher."""
-    args = parse_args()
     
-    # Set output directory
+    # ========== SLURM Configuration ==========
+    ngpus = 4
+    nodes = 1
+    timeout_min = 10000
+    partition = "vanderbc_gpu"
+    constraint = "h100"
+    
+    # ========== Architecture Configuration ==========
+    arch = 'vit_base'
+    patch_size = 16
+    embed_dim = 768
+    num_heads = 12
+    depth = 12
+    mlp_ratio = 4.0
+
+    # ========== TME Head Configuration ==========
+    tme_hidden_dim = 2048
+    tme_output_dim = 256
+    tme_layers = 3
+
+    # ========== Mask Model Configuration ==========
+    mask_model_type = 'adios'  # <vit_unet preset> 'vit_unet'
+    num_masks = 3
+    crops_per_mask = 0
+    mask_update_freq = 1
+    mask_dropout = 0.0  # <vit_unet preset> 0.2
+    mask_encoder_dim = 192  # <vit_unet preset> 384
+    mask_encoder_depth = 12
+    mask_encoder_checkpoint = None  # <vit_unet preset> '/data1/vanderbc/nandas1/TCGA_Dinov2_ViT-B_run2/logs/checkpoint.pth'
+    freeze_mask_encoder = False  # <vit_unet preset> True
+
+    # ========== Reconstructor Configuration ==========
+    use_reconstructor = False  # <vit_unet preset> True
+    reconstructor_encoder_dim = 192  # <vit_unet preset> 384
+    reconstructor_encoder_depth = 12
+    beta_reconstruction = 1.0
+    reconstructor_update_freq = 1
+
+    # ========== ADIOS Loss Configuration ==========
+    sparsity_penalty_type = 'inverse_sin'  # <vit_unet preset> 'sinh_squared'
+    alpha_sparsity = 0.1
+    initial_temp = 0.1
+    final_temp = 0.1
+    reconstruction_weight = 0.1
+
+    # ========== Optimizer Configuration ==========
+    optimizer_type = 'sgd'  # <vit_unet preset> 'adamw'
+    use_lars = True  # <vit_unet preset> False
+    lars_eta = 0.02
+    momentum = 0.9
+    exclude_bias_n_norm_lars = True
+    mask_lr_ratio = 0.25
+
+    # ========== Training Configuration ==========
+    batch_size_per_gpu = 8  # <vit_unet preset> 64
+    total_iterations = 300_000
+    warmup_iterations = 10_000
+    
+    effective_batch = batch_size_per_gpu * ngpus * nodes
+    lr = 0.4 * (effective_batch / 256.0)  # <vit_unet preset> 5e-5 * (effective_batch / 256.0)
+    min_lr = 1e-5  # <vit_unet preset> 1e-6
+    weight_decay = 0.0  # <vit_unet preset> 0.04
+    clip_grad = 1.0
+
+    # ========== Training Setup ==========
+    use_fp16 = True
+    grad_checkpointing = True
+    num_workers = 8
+
+    # ========== Logging & Checkpointing ==========
+    save_freq = 2_000
+    log_freq = 10
+    viz_freq = 500
+
+    # ========== Dataset Configuration ==========
+    data_path = "/data1/vanderbc/foundation_model_training_images/TCGA"
+    img_size = 224
+
+    # ========== Build args namespace ==========
+    args = argparse.Namespace(
+        # Architecture
+        arch=arch,
+        patch_size=patch_size,
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        depth=depth,
+        mlp_ratio=mlp_ratio,
+        # TME Head
+        tme_hidden_dim=tme_hidden_dim,
+        tme_output_dim=tme_output_dim,
+        tme_layers=tme_layers,
+        # Mask Model
+        mask_model_type=mask_model_type,
+        num_masks=num_masks,
+        crops_per_mask=crops_per_mask,
+        mask_update_freq=mask_update_freq,
+        mask_dropout=mask_dropout,
+        mask_encoder_dim=mask_encoder_dim,
+        mask_encoder_depth=mask_encoder_depth,
+        mask_encoder_checkpoint=mask_encoder_checkpoint,
+        freeze_mask_encoder=freeze_mask_encoder,
+        # Reconstructor
+        use_reconstructor=use_reconstructor,
+        reconstructor_encoder_dim=reconstructor_encoder_dim,
+        reconstructor_encoder_depth=reconstructor_encoder_depth,
+        beta_reconstruction=beta_reconstruction,
+        reconstructor_update_freq=reconstructor_update_freq,
+        # Loss
+        sparsity_penalty_type=sparsity_penalty_type,
+        alpha_sparsity=alpha_sparsity,
+        initial_temp=initial_temp,
+        final_temp=final_temp,
+        reconstruction_weight=reconstruction_weight,
+        # Optimizer
+        optimizer_type=optimizer_type,
+        use_lars=use_lars,
+        lars_eta=lars_eta,
+        momentum=momentum,
+        exclude_bias_n_norm_lars=exclude_bias_n_norm_lars,
+        mask_lr_ratio=mask_lr_ratio,
+        # Training
+        batch_size_per_gpu=batch_size_per_gpu,
+        total_iterations=total_iterations,
+        warmup_iterations=warmup_iterations,
+        lr=lr,
+        min_lr=min_lr,
+        weight_decay=weight_decay,
+        clip_grad=clip_grad,
+        use_fp16=use_fp16,
+        grad_checkpointing=grad_checkpointing,
+        num_workers=num_workers,
+        # Logging
+        save_freq=save_freq,
+        log_freq=log_freq,
+        viz_freq=viz_freq,
+        # Data
+        data_path=data_path,
+        img_size=img_size,
+        # Distributed (populated later)
+        world_size=ngpus * nodes,
+        rank=0,
+        seed=42,
+        dist_url=None,
+        local_rank=0,
+        gpu=0,
+        output_dir=None,
+    )
+
+    # ========== Setup output directory ==========
     args.output_dir = str(get_shared_folder())
-    
-    # Setup executor
+    args.dist_url = get_init_file().as_uri()
+
+    # ========== Setup executor ==========
     executor = submitit.AutoExecutor(folder=args.output_dir, slurm_max_num_timeout=30)
 
-    # Job name with timestamp
     job_name = f"adios_tme_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    # Slurm parameters
-    num_gpus_per_node = args.ngpus
-    nodes = args.nodes
-    timeout_min = args.timeout
 
     executor.update_parameters(
         mem_gb=256,
-        gpus_per_node=num_gpus_per_node,
-        tasks_per_node=num_gpus_per_node,
+        gpus_per_node=ngpus,
+        tasks_per_node=ngpus,
         cpus_per_task=8,
         nodes=nodes,
         timeout_min=timeout_min,
-        slurm_partition=args.partition,
+        slurm_partition=partition,
         slurm_signal_delay_s=120,
-        slurm_gres=f'gpu:{args.ngpus}',
-        slurm_constraint=args.constraint,
+        slurm_gres=f'gpu:{ngpus}',
+        slurm_constraint=constraint,
         slurm_setup=[
             f'export OMP_NUM_THREADS=8',
             f'export NCCL_SOCKET_IFNAME=ib,bond',
             f'export MASTER_PORT=23468',
-            f'export WORLD_SIZE={num_gpus_per_node * nodes}',
+            f'export WORLD_SIZE={ngpus * nodes}',
         ]
     )
     
     executor.update_parameters(name=job_name)
 
-    args.dist_url = get_init_file().as_uri()
-
-    # ========== Architecture Configuration ==========
-    args.arch = 'vit_base'
-    args.patch_size = 16
-    args.embed_dim = 768
-    args.num_heads = 12 # please make heads * 64 = 768, good for Fast Attention methods
-    args.depth = 12
-    args.mlp_ratio = 4.0
-
-    # ========== TME Head Configuration ==========
-    args.tme_hidden_dim = 2048
-    args.tme_output_dim = 256
-    args.tme_layers = 3
-
-    # ========== Mask Model Configuration ==========
-    args.mask_model_type = 'adios'  # Ours: 'vit_unet', ADIOS:'adios'
-    args.num_masks = 3
-    args.mask_encoder_dim = 384
-    args.mask_encoder_depth = 12
-    args.mask_update_freq = 1
-    args.mask_dropout = 0.2
-    args.crops_per_mask = 0
-    args.sparsity_penalty_type = 'sinh_squared'
-    # In case you don't want to train the mask model backbone and have a checkpoint ready
-    args.freeze_mask_encoder = True
-    args.mask_encoder_checkpoint = '/data1/vanderbc/nandas1/TCGA_Dinov2_ViT-B_run2/logs/checkpoint.pth' 
-
-    # ========== Reconstructor Model Configuration ==========
-    args.use_reconstructor = True
-    args.reconstructor_encoder_dim = args.mask_encoder_dim
-    args.reconstructor_encoder_depth = args.mask_encoder_depth
-    args.beta_reconstruction = 1.0
-    args.reconstructor_update_freq = 1
-
-    # ========== ADIOS Loss Configuration ==========
-    args.alpha_sparsity = 0.1
-    args.initial_temp = 0.2
-    args.final_temp = 0.05
-    args.reconstruction_weight = 0.1
-
-    # ========== Training Configuration ==========
-    args.batch_size_per_gpu = 128
-    args.total_iterations = 300_000
-    args.warmup_iterations = 10_000
-    args.lr = 5e-5
-    args.min_lr = 1e-6
-    args.weight_decay = 0.0 # ADIOS: 0.0, Ours: 0.04
-    args.clip_grad = 1.0
-
-    # ========== Training Setup ==========
-    args.use_fp16 = True
-    args.grad_checkpointing = True
-    args.num_workers = 8
-
-    # ========== Logging & Checkpointing ==========
-    args.save_freq = 2_000
-    args.log_freq = 10
-    args.viz_freq = 500
-
-    # ========== Dataset Configuration ==========
-    args.data_path = "/data1/vanderbc/foundation_model_training_images/TCGA"
-    args.img_size = 224
-
-    # ========== Calculate Effective Batch Size ==========
-    effective_batch_size = args.batch_size_per_gpu * num_gpus_per_node * nodes
-    
-    # Scale learning rate with batch size
-    args.lr = args.lr * (effective_batch_size / 256.0)
-    
-    # Save configuration
+    # ========== Save configuration ==========
     config_file = os.path.join(args.output_dir, f"{job_name}_config.txt")
     with open(config_file, "w") as f:
         f.write("ADIOS-TME Training Configuration\n")
@@ -197,51 +244,26 @@ def main():
         for arg, value in sorted(vars(args).items()):
             f.write(f"{arg}: {value}\n")
 
-    # Create and submit trainer
+    # ========== Submit job ==========
     trainer = Trainer(args)
     job = executor.submit(trainer)
 
-    # Print submission info
+    # ========== Print summary ==========
     print("\n" + "=" * 80)
-    print("JOB SUBMITTED SUCCESSFULLY")
+    print("JOB SUBMITTED")
     print("=" * 80)
     print(f"Job ID: {job.job_id}")
-    print(f"Job name: {job_name}")
-    print(f"Output directory: {args.output_dir}")
-    print(f"Config file: {config_file}")
+    print(f"Output: {args.output_dir}")
+    print()
+    print(f"Mask model: {mask_model_type}")
+    print(f"Optimizer: {optimizer_type}" + (" + LARS" if use_lars else ""))
+    print(f"Batch size: {batch_size_per_gpu} per GPU × {ngpus * nodes} GPUs = {effective_batch}")
+    print(f"LR: {lr:.6f}")
+    print(f"Reconstructor: {use_reconstructor}")
     print("=" * 80)
-    
-    print("\n" + "=" * 80)
-    print("TRAINING CONFIGURATION SUMMARY")
-    print("=" * 80)
-    print(f"Architecture: {args.arch}")
-    print(f"  Patch size: {args.patch_size}")
-    print(f"  Embedding dim: {args.embed_dim}")
-    print(f"  Num heads: {args.num_heads}")
-    print(f"  Depth: {args.depth}")
     print()
-    print(f"Mask Configuration:")
-    print(f"  Num masks: {args.num_masks}")
-    print(f"  Mask update freq: {args.mask_update_freq}")
-    print()
-    print(f"Training:")
-    print(f"  Batch size per GPU: {args.batch_size_per_gpu}")
-    print(f"  Total GPUs: {num_gpus_per_node * nodes} ({nodes} node(s) × {num_gpus_per_node} GPUs)")
-    print(f"  Effective batch size: {effective_batch_size}")
-    print(f"  Learning rate: {args.lr:.2e} (scaled)")
-    print(f"  Total iterations: {args.total_iterations:,}")
-    print()
-    print(f"Checkpointing:")
-    print(f"  Save frequency: every {args.save_freq} iterations")
-    print(f"  Visualization frequency: every {args.viz_freq} iterations")
-    print("=" * 80 + "\n")
-    
-    print("Monitor job:")
-    print(f"  tail -f {args.output_dir}/{job.job_id}_0_log.out")
-    print(f"  squeue -u $USER | grep {job.job_id}")
-    print()
-    print("Cancel job:")
-    print(f"  scancel {job.job_id}")
+    print(f"Monitor: tail -f {args.output_dir}/{job.job_id}_0_log.out")
+    print(f"Cancel:  scancel {job.job_id}")
     print()
 
 
