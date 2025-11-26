@@ -271,7 +271,7 @@ def train_adios_tme(args):
     adios_loss = ADIOSLoss(
         alpha_sparsity=args.alpha_sparsity,
         img_size=224,
-        temperature=0.1,  # Fixed temperature (no schedule)
+        temperature=args.initial_temp,  # Fixed temperature (no schedule)
         sparsity_penalty_type=args.sparsity_penalty_type,
     ).cuda()
     
