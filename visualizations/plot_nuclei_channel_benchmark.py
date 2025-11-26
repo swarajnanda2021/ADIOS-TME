@@ -63,7 +63,7 @@ def build_mask_model_from_args(args, device):
         )
     else:
         from models.vision_transformer.modern_vit import VisionTransformer
-        from models.vision_transformer.auxiliary_models import MaskModel_SpectralNorm
+        from models.vision_transformer.auxiliary_models import MaskModel
         
         mask_encoder_dim = getattr(args, 'mask_encoder_dim', 192)
         mask_encoder_depth = getattr(args, 'mask_encoder_depth', 12)
@@ -84,7 +84,7 @@ def build_mask_model_from_args(args, device):
             num_register_tokens=4,
         )
         
-        mask_model = MaskModel_SpectralNorm(
+        mask_model = MaskModel(
             encoder=mask_encoder,
             num_masks=num_masks,
             encoder_dim=mask_encoder_dim,
