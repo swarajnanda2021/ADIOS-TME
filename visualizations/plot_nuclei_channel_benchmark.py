@@ -12,23 +12,39 @@ import glob
 import re
 import json
 import gc
-import torch
-import torch.nn.functional as F
+import argparse
+import importlib.util
 import numpy as np
 from pathlib import Path
 from collections import OrderedDict
 from tqdm import tqdm
+
+import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-# Add parent directory to path for model imports
+# Add ADIOS-UNet parent directory to path for model imports
 script_dir = Path(__file__).parent.absolute()
 parent_dir = script_dir.parent
 sys.path.insert(0, str(parent_dir))
 
-# Add PostProc directory for datasets
-sys.path.insert(0, "/data1/vanderbc/nandas1/PostProc")
+# Import ADIOS-UNet models (these come from parent_dir/models/)
+from models.UNet import ADIOSMaskModel
+from models.vision_transformer.modern_vit import VisionTransformer
+from models.vision_transformer.auxiliary_models import MaskModel
 
-from datasets import PanNukeDataset, MonuSegDataset, SynchronizedTransform
+# Load datasets module directly from PostProc path (avoids path conflicts)
+def load_datasets_module():
+    datasets_path = "/data1/vanderbc/nandas1/PostProc/datasets.py"
+    spec = importlib.util.spec_from_file_location("postproc_datasets", datasets_path)
+    datasets_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(datasets_module)
+    return datasets_module
+
+datasets_module = load_datasets_module()
+PanNukeDataset = datasets_module.PanNukeDataset
+MonuSegDataset = datasets_module.MonuSegDataset
+SynchronizedTransform = datasets_module.SynchronizedTransform
 
 
 def find_checkpoints(logs_dir):
