@@ -35,7 +35,7 @@ from models.vision_transformer.auxiliary_models import MaskModel
 
 # Load datasets module directly from PostProc path (avoids path conflicts)
 def load_datasets_module():
-    datasets_path = "/data1/vanderbc/nandas1/PostProc/datasets.py"
+    datasets_path = "/path/to/your/postproc/folder/PostProc/datasets.py"
     spec = importlib.util.spec_from_file_location("postproc_datasets", datasets_path)
     datasets_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(datasets_module)
@@ -217,8 +217,8 @@ def main():
     logs_dir = script_dir.parent / 'logs'
     output_dir = script_dir
     
-    pannuke_path = "/data1/vanderbc/nandas1/Benchmarks/PanNuke_patches_unnormalized"
-    monuseg_path = "/data1/vanderbc/nandas1/Benchmarks/MonuSeg_patches_unnormalized"
+    pannuke_path = "/path/to/your/benchmark/dataset/folder/Benchmarks/PanNuke_patches_unnormalized"
+    monuseg_path = "/path/to/your/benchmark/dataset/folder/Benchmarks/MonuSeg_patches_unnormalized"
     
     results_path = output_dir / 'nuclei_channel_benchmark.json'
     

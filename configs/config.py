@@ -108,7 +108,7 @@ def get_args_parser():
     
     # ========== Data ==========
     parser.add_argument('--data_path', 
-                        default='/data1/vanderbc/foundation_model_training_images/TCGA',
+                        default='/path/to/your/training/dataset/foundation_model_training_images/TCGA',
                         type=str, help='Path to training data')
     parser.add_argument('--num_workers', default=8, type=int,
                         help='Number of data loading workers per GPU')

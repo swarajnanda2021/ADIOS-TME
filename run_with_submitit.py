@@ -15,7 +15,7 @@ from training.trainer import train_adios_tme
 
 def get_shared_folder() -> Path:
     """Get shared folder for logs and checkpoints."""
-    p = Path(f"/data1/vanderbc/nandas1/ADIOS-UNet/logs")
+    p = Path(f"/path/to/your/training/folder/logs")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -62,7 +62,7 @@ def main():
     ngpus = 2
     nodes = 1
     timeout_min = 10000
-    partition = "vanderbc_gpu"
+    partition = "your-slurm-partition-name"
     constraint = "h100"
     
     # ========== Architecture Configuration ==========
@@ -86,8 +86,8 @@ def main():
     mask_dropout = 0.0  # <vit_unet preset> 0.2
     mask_encoder_dim = 192  # <vit_unet preset> 384
     mask_encoder_depth = 12
-    mask_encoder_checkpoint = None  # <vit_unet preset> '/data1/vanderbc/nandas1/TCGA_Dinov2_ViT-B_run2/logs/checkpoint.pth'
-    freeze_mask_encoder = False  # <vit_unet preset> True
+    mask_encoder_checkpoint = None  # 
+    freeze_mask_encoder = False  #
 
     # ========== ADIOS Loss Configuration ==========
     sparsity_penalty_type = 'inverse_sin'  # <vit_unet preset> 'sinh_squared'
@@ -126,7 +126,7 @@ def main():
     viz_freq = 500
 
     # ========== Dataset Configuration ==========
-    data_path = "/data1/vanderbc/foundation_model_training_images/TCGA"
+    data_path = "/path/to/your/training/dataset/foundation_model_training_images/TCGA"
     img_size = 224
 
     # ========== Build args namespace ==========
