@@ -35,8 +35,10 @@ pip install pillow
 
 ### Hardware Requirements
 
-- CUDA-capable GPU with at least 16GB VRAM (24GB+ recommended for ViT-Base)
-- For multi-node training: InfiniBand or high-speed ethernet interconnect
+- **GPU Architecture**: NVIDIA Ampere (A100, A6000) or newer required due to XFormers dependencies. This code will not work on pre-Ampere GPUs (V100, RTX 20-series, etc.).
+- **VRAM**: Minimum 40GB GPU memory for batch size 128. For smaller GPUs, reduce `batch_size_per_gpu` accordingly.
+- **System RAM**: 64GB+ recommended for large-scale dataset loading.
+- **Multi-node**: InfiniBand or high-speed ethernet interconnect for distributed training.
 
 ## Project Structure
 
@@ -65,6 +67,21 @@ pip install pillow
 ├── run_with_submitit.py       # SLURM cluster submission script
 └── utils.py                   # Distributed training and general utilities
 ```
+
+## Paths to Update
+
+Before running training, you must update the following placeholder paths in the codebase:
+
+| File | Path Variable | Description |
+|------|---------------|-------------|
+| `configs/config.py` | `--data_path` default | Root directory containing your training dataset |
+| `run_with_submitit.py` | `data_path` | Training dataset path for SLURM jobs |
+| `run_with_submitit.py` | `get_shared_folder()` | Log and checkpoint output directory |
+| `run_with_submitit.py` | `partition` | Your SLURM partition name |
+| `visualizations/plot_nuclei_channel_benchmark.py` | `pannuke_path`, `monuseg_path` | Benchmark dataset locations |
+| `visualizations/plot_nuclei_channel_benchmark.py` | `datasets_path` | Path to PostProc datasets module |
+
+All paths marked with `/path/to/...` in the source files require modification for your environment.
 
 ## Quick Start
 
@@ -107,7 +124,7 @@ python run_with_submitit.py
 | `--patch_size` | `16` | Patch size for vision transformer |
 | `--embed_dim` | `768` | Embedding dimension (384/768/1024 for S/B/L) |
 | `--depth` | `12` | Number of transformer blocks |
-| `--num_heads` | `12` | Number of attention heads |
+| `--num_heads` | `12` | Number of attention heads (should be `embed_dim // 64`) |
 
 ### Mask Model
 
@@ -137,9 +154,11 @@ python run_with_submitit.py
 | `--initial_temp` | `0.2` | Initial contrastive temperature |
 | `--final_temp` | `0.05` | Final contrastive temperature |
 
-## Data Format
+## Data Loading
 
-The dataset expects histopathology images organized in zip archives:
+### Included Dataset Implementation
+
+The provided `ADIOSPathologyDataset` in `data/datasets.py` is designed for a specific data format: histopathology patches stored in zip archives with 448×448 pixel images that are resized to 224×224 during loading. The dataset expects the following structure:
 
 ```
 data_path/
@@ -151,13 +170,19 @@ data_path/
 └── ...
 ```
 
-A dataset index file (`dataset_index.pkl`) should be pre-generated listing all zip files and their contents. The dataset filters for 448px patches by default (configurable in `datasets.py`).
+A pre-generated dataset index file (`dataset_index.pkl`) listing all zip files and their contents is required. The dataloader filters for filenames containing `_448_` and resizes all images to 224×224 pixels before normalization.
+
+### Using Your Own Dataloader
+
+**The included dataloader is specific to a particular dataset format and will likely require replacement for your use case.** To use your own data pipeline, replace the dataset instantiation in `training/trainer.py` with your custom implementation. Your dataloader should yield normalized image tensors of shape `[B, 3, 224, 224]`.
 
 ### Normalization
 
 Default normalization values are tuned for H&E stained histopathology images:
 - Mean: `(0.6816, 0.5640, 0.7232)`
 - Std: `(0.1617, 0.1714, 0.1389)`
+
+Adjust these values in your dataloader if your images have different staining characteristics.
 
 ## Training Dynamics
 
@@ -203,7 +228,19 @@ python visualizations/plot_nuclei_channel_benchmark.py
 
 ## Citation
 
-If you use this code, please cite the original ADIOS paper:
+If you use this code in your research, please cite both this repository and the original ADIOS paper:
+
+### This Repository
+
+```bibtex
+@software{adios_tme_2025,
+  title={ADIOS-TME: Adversarial Masking Implementation With Extension to Multi-Node and CellViT Decoder},
+  year={2025},
+  url={https://github.com/YOUR_USERNAME/ADIOS-TME}
+}
+```
+
+### Original ADIOS Paper
 
 ```bibtex
 @inproceedings{shi2022adversarial,
