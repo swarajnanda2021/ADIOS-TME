@@ -1,6 +1,6 @@
-# ADIOS-TME: Adversarial Masking for Histopathology Self-Supervised Learning
+# ADIOS-TME: Adversarial Masking Implementation With Extension to Multi-Node and CellViT Decoder
 
-A PyTorch implementation of adversarial masking for self-supervised representation learning in computational pathology. This codebase adapts the ADIOS (Adversarial Inference-Occlusion Self-supervision) framework from [Shi et al. (ICML 2022)](https://arxiv.org/abs/2201.13100) for histopathology image analysis, with extensions for tissue microenvironment (TME) aware learning.
+A PyTorch implementation of adversarial masking for self-supervised representation learning in computational pathology. This codebase adapts the ADIOS (Adversarial Inference-Occlusion Self-supervision) framework from [Shi et al. (ICML 2022)](https://arxiv.org/abs/2201.13100) for histopathology image analysis.
 
 ## Overview
 
