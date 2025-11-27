@@ -2,6 +2,8 @@
 
 A PyTorch implementation of adversarial masking for self-supervised representation learning in computational pathology. This codebase adapts the ADIOS (Adversarial Inference-Occlusion Self-supervision) framework from [Shi et al. (ICML 2022)](https://arxiv.org/abs/2201.13100) for histopathology image analysis.
 
+![Mask Visualization](Images/iter_049500_masks.png)
+
 ## Overview
 
 This framework learns visual representations by simultaneously training:
