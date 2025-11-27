@@ -236,7 +236,7 @@ If you use this code in your research, please cite both this repository and the 
 @software{adios_tme_2025,
   title={ADIOS-TME: Adversarial Masking Implementation With Extension to Multi-Node and CellViT Decoder},
   year={2025},
-  url={https://github.com/YOUR_USERNAME/ADIOS-TME}
+  url={https://github.com/swarajnanda2021/ADIOS-TME}
 }
 ```
 
