@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from cellvit.datasets import PanNukeDataset, SynchronizedTransform
+from cellvit.datasets import SynchronizedTransform
 from cellvit.postproc.benchmarking import (
     __proc_np_hv,
     aggregated_jaccard_index,
@@ -22,6 +22,7 @@ from cellvit.postproc.benchmarking import (
 from adios_cellvit.adios_backbone import load_adios_mask_model
 from adios_cellvit.adios_cellvit_model import ADIOSCellViT
 from adios_cellvit.channel_selector import ChannelSelector
+from adios_cellvit.pannuke_dataset import ADIOSPanNukeDataset
 
 
 def parse_args():
@@ -67,7 +68,7 @@ def main():
         {'normalize': {'mean': config['normalize_mean'], 'std': config['normalize_std']}},
         input_shape=224,
     )
-    test_dataset = PanNukeDataset(
+    test_dataset = ADIOSPanNukeDataset(
         data_dir=args.pannuke_path,
         split='Test',
         magnification=config['magnification'],
