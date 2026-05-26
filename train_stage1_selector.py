@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
-from cellvit.datasets import PanNukeDataset, SynchronizedTransform
+from cellvit.datasets import SynchronizedTransform
 from cellvit.utils import WarmupDecayScheduler, set_seed
 
 from adios_cellvit.adios_backbone import load_adios_mask_model
@@ -24,6 +24,7 @@ from adios_cellvit.channel_selector import (
     ChannelSelector,
     compute_best_channel_target,
 )
+from adios_cellvit.pannuke_dataset import ADIOSPanNukeDataset
 
 
 def _load_config(config_path: str) -> dict:
@@ -58,14 +59,14 @@ def build_loaders(config):
     train_transform = SynchronizedTransform(train_transform_settings, input_shape=224)
     val_transform = SynchronizedTransform(val_transform_settings, input_shape=224)
 
-    train_dataset = PanNukeDataset(
+    train_dataset = ADIOSPanNukeDataset(
         data_dir=config['pannuke_path'],
         split='Training',
         magnification=config['magnification'],
         transform=train_transform,
     )
     # Held out for after the run; kept for symmetry with stage 2.
-    _ = PanNukeDataset(
+    _ = ADIOSPanNukeDataset(
         data_dir=config['pannuke_path'],
         split='Test',
         magnification=config['magnification'],
@@ -101,7 +102,7 @@ def run_epoch(selector, mask_model, loader, optimizer, device, train: bool):
 
     grad_ctx = torch.enable_grad() if train else torch.no_grad()
     with grad_ctx:
-        for image, mask_2ch, _, _ in loader:
+        for image, mask_2ch, _, _, _ in loader:
             image = image.to(device, non_blocking=True)
             gt_binary = mask_2ch[:, 0].to(device, non_blocking=True).float()
 
