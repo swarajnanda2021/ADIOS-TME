@@ -71,25 +71,55 @@ Add the NC (nuclei classification) decoder as a third branch. Concretely:
 `self.cellvit.hv_map_decoder` / `self.cellvit.nuclei_type_map_decoder`
 directly, so those names must exist after the modification.
 
-## 3. Dataloader must return a 5-tuple including per-pixel class labels (HANDOFF §6.2)
+## 3. Provide the unified PanNuke layout
 
-`train_stage2_cellvit.py` and `evaluate_pannuke.py` unpack each batch as
+The training and eval scripts read from a dedicated `ADIOSPanNukeDataset`
+(in `adios_cellvit/pannuke_dataset.py`) — they do NOT use PostProc's
+`HoverNetBasedDataset` / `PanNukeDataset`. The earlier idea of extending
+`HoverNetBasedDataset` to return a 5th class-mask tensor was abandoned in
+favor of this dedicated dataloader. `cellvit/datasets.py` only needs to
+provide `SynchronizedTransform`; its `*Dataset` classes are not used.
 
-```python
-image, mask_2ch, distance_map, instance_mask, class_mask = batch
+The expected layout at `<pannuke_path>`:
+
+```
+<pannuke_path>/
+├── Training/
+│   └── 40x/
+│       ├── tissue_images/<patch>.png
+│       ├── instance_masks/<patch>.npy           # uint16 instance ID map
+│       └── class_masks/
+│           ├── neoplastic/<patch>.png           # uint8, per-class instance-labeled
+│           ├── inflammatory/<patch>.png
+│           ├── connective/<patch>.png
+│           ├── dead/<patch>.png
+│           └── epithelial/<patch>.png
+└── Test/
+    └── 40x/
+        ├── tissue_images/
+        ├── instance_masks/
+        └── class_masks/
+            └── ... (same 5 subdirs)
 ```
 
-`HoverNetBasedDataset` in PostProc currently returns 4 tensors and stops at
-`instance_mask`. For stage 2 NC training we need a 5th tensor:
+Notes:
 
-- `class_mask`: `LongTensor [H, W]` with values in `{0, 1, ..., 5}` where 0 is
-  background and 1..5 are the PanNuke classes (neoplastic, inflammatory,
-  connective, dead, epithelial).
+- The `non_neoplastic` subdir from the wtypes folder is intentionally
+  **excluded** — it's misleadingly named (actually the background mask), and
+  background is implied by all 5 foreground class masks being zero.
+- The class-mask folder is named `class_masks/` (not `masks/`) to disambiguate
+  from the instance-mask folder.
+- Each sample's class mask is built per-batch by stacking the 5 class PNGs
+  and taking argmax with foreground offset (index 0 = background, 1..5 = the
+  five classes in `FOREGROUND_CLASSES`).
 
-Either confirm `HoverNetBasedDataset` already exposes this (and adjust the
-import / unpack as needed), or extend `HoverNetBasedDataset.__getitem__` to
-return it as the 5th item. A `TODO(cluster-assembly)` block at the top of
-`train_stage2_cellvit.py` calls this out.
+The `ADIOSPanNukeDataset` returns a 5-tuple
+`(image, mask_2ch, distance_map, instance_mask, class_mask)` matching the
+loop unpack in `train_stage2_cellvit.py` and `evaluate_pannuke.py`. A
+`TODO(cluster-test)` in the dataset file flags one thing to verify at first
+cluster run: that `SynchronizedTransform` handles a 2-channel HWC mask
+input (instance + class concatenated) without errors. If it doesn't, the
+fix is to apply the geometric augmentation to the class mask manually.
 
 ## 4. Fill placeholder paths in `configs/nuclei_counter.py`
 
