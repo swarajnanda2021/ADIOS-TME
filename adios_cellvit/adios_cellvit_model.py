@@ -1,7 +1,13 @@
-"""End-to-end nuclei counter: ADIOS backbone + selector + CellViT heads.
+"""End-to-end nuclei counter: ADIOS mask model + selector + CellViT heads.
 
-The NP branch from CellViT is overridden by the ADIOS mask decoder collapsed
-through ``ChannelSelector``. The HV and NC branches come from CellViT.
+The MASK MODEL (192-dim ViT-Tiny encoder + UNet decoder) is the asset of
+interest from ADIOS training; the original student encoder is not used.
+
+Stage 1: only the selector is trained. The mask model is frozen.
+Stage 2: the mask model (encoder + UNet decoder) is fine-tuned at LR 1e-6,
+         the HoVer + NC heads are trained at LR 1e-4, the selector is
+         parameter-frozen but still called (its softmax weights are part
+         of the differentiable path).
 """
 
 from typing import Dict
@@ -21,19 +27,21 @@ from .channel_selector import (
 
 
 class ADIOSCellViT(nn.Module):
-    """Wrap ADIOS + selector + CellViT into a single model.
+    """Wrap ADIOS mask model + selector + CellViT into a single model.
 
     Components:
-      * ``encoder``      — ViT, frozen in both stages.
-      * ``mask_decoder`` — ADIOS ViT-UNet decoder. Stage 1: frozen.
-                          Stage 2: trainable at LR 1e-6.
+      * ``mask_model``   — ADIOS ViT-UNet mask model (192-dim ViT-Tiny encoder
+                          + UNet decoder). Stage 1: frozen.
+                          Stage 2: trainable at LR 1e-6 (encoder + decoder).
       * ``selector``     — ChannelSelector. Stage 1: trainable. Stage 2:
                           parameter-frozen but still called (its softmax
                           weights are part of the differentiable path).
       * ``cellvit``      — provides ``hv_map_decoder`` and
-                          ``nuclei_type_map_decoder``. Its own NP branch is
-                          left in place (so unchanged upstream code still
-                          works) but is not called by us.
+                          ``nuclei_type_map_decoder``. Constructed with
+                          ``encoder=mask_model.encoder`` and
+                          ``encoder_dim=192``; CellViT's small-encoder
+                          decoder dimensioning kicks in automatically
+                          (``embed_dim < 512`` branch).
 
     Forward returns a dict with:
       ``masks``           ``[B, 1, H, W]``  NP map from ADIOS+selector collapse.
@@ -44,10 +52,8 @@ class ADIOSCellViT(nn.Module):
 
     def __init__(
         self,
-        encoder: nn.Module,
-        mask_decoder: nn.Module,
+        mask_model: nn.Module,
         selector: ChannelSelector,
-        encoder_dim: int = 768,
         num_classes: int = 5,
         drop_rate: float = 0.1,
         inference_mode: str = 'soft',
@@ -55,17 +61,16 @@ class ADIOSCellViT(nn.Module):
         super().__init__()
         assert inference_mode in ('soft', 'argmax')
 
-        self.encoder = encoder
-        self.mask_decoder = mask_decoder
+        self.mask_model = mask_model
         self.selector = selector
         self.inference_mode = inference_mode
 
-        # CellViT freezes self.encoder.parameters() in its __init__ — which is
-        # what we want — and the encoder reference is shared, so its features
-        # are computed once per forward.
+        # CellViT consumes features from the 192-dim mask encoder.
+        # encoder_dim=192 triggers CellViT's small-encoder decoder dimensioning
+        # (skip_dim_11=256, skip_dim_12=128, bottleneck_dim=256).
         self.cellvit = CellViT(
-            encoder=encoder,
-            encoder_dim=encoder_dim,
+            encoder=mask_model.encoder,
+            encoder_dim=192,
             num_classes=num_classes,
             drop_rate=drop_rate,
         )
@@ -81,15 +86,22 @@ class ADIOSCellViT(nn.Module):
             p.requires_grad = False
         self.selector.eval()
 
-    def unfreeze_mask_decoder(self):
-        for p in self.mask_decoder.parameters():
+    def unfreeze_mask_model(self):
+        """Unfreeze the entire mask model for stage 2 fine-tuning.
+
+        Unfreezes BOTH the 192-dim ViT-Tiny encoder (``mask_model.encoder``)
+        and the UNet decoder. Both train at the lower LR group (1e-6).
+        """
+        for p in self.mask_model.parameters():
             p.requires_grad = True
-        self.mask_decoder.train()
+        self.mask_model.train()
 
     # ---- Forward ------------------------------------------------------------
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
-        mask_output = self.mask_decoder(images)['masks']
+        # 3-channel mask output from ADIOS mask model.
+        # This call internally runs mask_model.encoder + UNet decoder.
+        mask_output = self.mask_model(images)['masks']
 
         channel_logits = self.selector(mask_output)
 
@@ -98,7 +110,11 @@ class ADIOSCellViT(nn.Module):
         else:
             np_map = collapse_channels_argmax(mask_output, channel_logits)
 
-        features = self.encoder.get_intermediate_layers(images)
+        # Features for HoVer + NC heads come from the 192-dim mask encoder.
+        # TODO(perf): cache the mask_model encoder features from the mask_model
+        # forward pass and reuse here. Requires modifying MaskModel.forward to
+        # optionally return intermediates. Defer to post-validation.
+        features = self.mask_model.encoder.get_intermediate_layers(images)
         f1, f2, f3, f4 = features
         num_registers = 4
         num_patches = f1.shape[1] - (num_registers + 1)
