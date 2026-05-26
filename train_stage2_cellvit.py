@@ -15,19 +15,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
-from cellvit.datasets import PanNukeDataset, SynchronizedTransform
+from cellvit.datasets import SynchronizedTransform
 from cellvit.utils import WarmupDecayScheduler, set_seed
 
 from adios_cellvit.adios_backbone import load_adios_mask_model
 from adios_cellvit.adios_cellvit_model import ADIOSCellViT
 from adios_cellvit.channel_selector import ChannelSelector
-
-
-# TODO(cluster-assembly): HANDOFF §6.2 — confirm HoverNetBasedDataset returns
-# a 5th tensor `class_mask` [B, H, W] LongTensor with PanNuke class indices
-# in {0, ..., 5} (0=background). If not, extend HoverNetBasedDataset to add
-# this output. Until then, this script's dataloader unpack will fail at the
-# 5-tuple destructure below.
+from adios_cellvit.pannuke_dataset import ADIOSPanNukeDataset
 
 
 class CombinedLossWithNC(nn.Module):
@@ -144,13 +138,13 @@ def build_loaders(config):
     train_transform = SynchronizedTransform(train_transform_settings, input_shape=224)
     val_transform = SynchronizedTransform(val_transform_settings, input_shape=224)
 
-    train_dataset = PanNukeDataset(
+    train_dataset = ADIOSPanNukeDataset(
         data_dir=config['pannuke_path'],
         split='Training',
         magnification=config['magnification'],
         transform=train_transform,
     )
-    _ = PanNukeDataset(
+    _ = ADIOSPanNukeDataset(
         data_dir=config['pannuke_path'],
         split='Test',
         magnification=config['magnification'],

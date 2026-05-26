@@ -37,7 +37,7 @@ STAGE2 = {
     'warmup_epochs':        5,
     'val_split':            0.2,
     'early_stop_patience':  10,
-    'num_classes':          5,
+    'num_classes':          6,  # 0=background + 5 PanNuke foreground classes
     'loss_weights': {
         'w_xentropy':  1.0,
         'w_dice':      1.0,
