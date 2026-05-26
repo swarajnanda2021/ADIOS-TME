@@ -1,13 +1,15 @@
-"""ADIOS-TME backbone + ViT-UNet mask decoder loader.
+"""ADIOS mask model loader.
 
-Loads the frozen encoder and mask decoder from an ADIOS-TME training
-checkpoint. This branch is pinned to ``mask_model_type='vit_unet'`` with
-``mask_encoder_dim=192`` and ``num_masks=3``. The UNet variant
-(``mask_model_type='adios'``) is not supported here.
+NOTE: Unlike the original ADIOS paper (Shi et al. 2022), this project keeps
+the MASK MODEL and discards the STUDENT encoder. The user trains general
+representation encoders separately by other methods; the mask model is the
+asset of interest here.
+
+The function loads only the mask model. The 768-dim student encoder present
+in the checkpoint is intentionally ignored.
 """
 
 import warnings
-from typing import Tuple
 
 import torch
 
@@ -15,26 +17,36 @@ from models.vision_transformer.modern_vit import VisionTransformer
 from models.vision_transformer.auxiliary_models import MaskModel
 
 
-def load_adios_backbone_and_decoder(
+def load_adios_mask_model(
     checkpoint_path: str,
     device: str = 'cuda',
-) -> Tuple[VisionTransformer, MaskModel]:
-    """Load ADIOS encoder + ViT-UNet mask decoder from a checkpoint.
+) -> MaskModel:
+    """Load the ADIOS-TME mask model from a training checkpoint.
 
-    Both the encoder and the mask decoder are returned in ``eval()`` mode with
-    every parameter frozen (``requires_grad=False``). Stage 2 can later call
-    ``model.unfreeze_mask_decoder()`` to allow fine-tuning.
+    The ADIOS-TME checkpoint contains both a 768-dim student encoder and the
+    mask model. In this project we DO NOT use the student encoder (the user
+    trains larger encoders separately via other methods). We only use the
+    mask model:
+
+      * ``MaskModel.encoder``  -- 192-dim ViT-Tiny, source of features for
+                                  downstream HoVer and NC heads.
+      * ``MaskModel.<UNet>``   -- 3-channel mask decoder, source of the
+                                  channel-selector input.
+
+    Pinned for this branch: ``mask_model_type='vit_unet'``,
+    ``mask_encoder_dim=192``, ``num_masks=3``. Raises ``ValueError`` if the
+    checkpoint args disagree.
+
+    The returned mask model is in ``eval()`` mode with all parameters frozen
+    (``requires_grad=False``). Stage 2 may call
+    ``ADIOSCellViT.unfreeze_mask_model()`` to enable fine-tuning.
 
     Args:
-        checkpoint_path: path to ADIOS-TME checkpoint (e.g. iter_94000).
+        checkpoint_path: path to ADIOS-TME checkpoint.pth.
         device: 'cuda' or 'cpu'.
 
     Returns:
-        (encoder, mask_decoder) — both frozen and in eval mode.
-
-    Raises:
-        ValueError: if the checkpoint was trained with a non-vit_unet mask
-            model architecture.
+        mask_model: ``MaskModel`` (frozen, eval mode).
     """
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     args = checkpoint['args']
@@ -56,30 +68,6 @@ def load_adios_backbone_and_decoder(
             f"num_masks={num_masks} (expected 3 for this branch)"
         )
 
-    encoder = VisionTransformer(
-        img_size=224,
-        patch_size=args.patch_size,
-        embed_dim=args.embed_dim,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        mlp_ratio=4.0,
-        qkv_bias=True,
-        drop_path_rate=0.4,
-        num_register_tokens=4,
-    )
-
-    backbone_state = {}
-    for k, v in checkpoint['student'].items():
-        if k.startswith('module.backbone.'):
-            backbone_state[k[len('module.backbone.'):]] = v
-        elif k.startswith('backbone.'):
-            backbone_state[k[len('backbone.'):]] = v
-    missing, unexpected = encoder.load_state_dict(backbone_state, strict=False)
-    if missing:
-        print(f"[adios_backbone] encoder missing keys: {missing}")
-    if unexpected:
-        print(f"[adios_backbone] encoder unexpected keys: {unexpected}")
-
     mask_encoder = VisionTransformer(
         img_size=224,
         patch_size=16,
@@ -91,7 +79,7 @@ def load_adios_backbone_and_decoder(
         num_register_tokens=4,
     )
 
-    mask_decoder = MaskModel(
+    mask_model = MaskModel(
         encoder=mask_encoder,
         num_masks=num_masks,
         encoder_dim=mask_encoder_dim,
@@ -104,17 +92,14 @@ def load_adios_backbone_and_decoder(
             mask_state[k[len('module.'):]] = v
         else:
             mask_state[k] = v
-    missing, unexpected = mask_decoder.load_state_dict(mask_state, strict=False)
+    missing, unexpected = mask_model.load_state_dict(mask_state, strict=False)
     if missing:
-        print(f"[adios_backbone] mask_decoder missing keys: {missing}")
+        print(f"[adios_backbone] mask_model missing keys: {missing}")
     if unexpected:
-        print(f"[adios_backbone] mask_decoder unexpected keys: {unexpected}")
+        print(f"[adios_backbone] mask_model unexpected keys: {unexpected}")
 
-    encoder.to(device).eval()
-    mask_decoder.to(device).eval()
-    for p in encoder.parameters():
-        p.requires_grad = False
-    for p in mask_decoder.parameters():
+    mask_model.to(device).eval()
+    for p in mask_model.parameters():
         p.requires_grad = False
 
-    return encoder, mask_decoder
+    return mask_model
