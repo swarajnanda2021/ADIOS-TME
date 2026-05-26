@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 from cellvit.datasets import PanNukeDataset, SynchronizedTransform
 from cellvit.utils import WarmupDecayScheduler, set_seed
 
-from adios_cellvit.adios_backbone import load_adios_backbone_and_decoder
+from adios_cellvit.adios_backbone import load_adios_mask_model
 from adios_cellvit.channel_selector import (
     ChannelSelector,
     compute_best_channel_target,
@@ -93,7 +93,7 @@ def build_loaders(config):
     return train_loader, val_loader
 
 
-def run_epoch(selector, mask_decoder, loader, optimizer, device, train: bool):
+def run_epoch(selector, mask_model, loader, optimizer, device, train: bool):
     selector.train(mode=train)
     total_loss = 0.0
     total_correct = 0
@@ -106,7 +106,7 @@ def run_epoch(selector, mask_decoder, loader, optimizer, device, train: bool):
             gt_binary = mask_2ch[:, 0].to(device, non_blocking=True).float()
 
             with torch.no_grad():
-                mask_output = mask_decoder(image)['masks']
+                mask_output = mask_model(image)['masks']
 
             target = compute_best_channel_target(mask_output, gt_binary)
             channel_logits = selector(mask_output)
@@ -138,10 +138,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     os.makedirs(config['output_dir'], exist_ok=True)
 
-    encoder, mask_decoder = load_adios_backbone_and_decoder(
-        config['adios_checkpoint'], device,
-    )
-    del encoder  # not needed in stage 1
+    mask_model = load_adios_mask_model(config['adios_checkpoint'], device)
 
     selector = ChannelSelector(num_masks=3).to(device)
 
@@ -168,10 +165,10 @@ def main():
 
     for epoch in range(config['max_epochs']):
         train_loss, train_acc = run_epoch(
-            selector, mask_decoder, train_loader, optimizer, device, train=True,
+            selector, mask_model, train_loader, optimizer, device, train=True,
         )
         val_loss, val_acc = run_epoch(
-            selector, mask_decoder, val_loader, optimizer, device, train=False,
+            selector, mask_model, val_loader, optimizer, device, train=False,
         )
         scheduler.step()
 

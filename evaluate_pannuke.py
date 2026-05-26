@@ -19,7 +19,7 @@ from cellvit.postproc.benchmarking import (
     panoptic_quality_semantic,
 )
 
-from adios_cellvit.adios_backbone import load_adios_backbone_and_decoder
+from adios_cellvit.adios_backbone import load_adios_mask_model
 from adios_cellvit.adios_cellvit_model import ADIOSCellViT
 from adios_cellvit.channel_selector import ChannelSelector
 
@@ -48,13 +48,11 @@ def main():
     config = _load_stage2_config(args.config)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    encoder, mask_decoder = load_adios_backbone_and_decoder(args.adios_checkpoint, device)
+    mask_model = load_adios_mask_model(args.adios_checkpoint, device)
     selector = ChannelSelector(num_masks=3).to(device)
     model = ADIOSCellViT(
-        encoder=encoder,
-        mask_decoder=mask_decoder,
+        mask_model=mask_model,
         selector=selector,
-        encoder_dim=768,
         num_classes=config['num_classes'],
         drop_rate=0.1,
         inference_mode='argmax',

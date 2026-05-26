@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 from cellvit.datasets import PanNukeDataset, SynchronizedTransform
 from cellvit.utils import WarmupDecayScheduler, set_seed
 
-from adios_cellvit.adios_backbone import load_adios_backbone_and_decoder
+from adios_cellvit.adios_backbone import load_adios_mask_model
 from adios_cellvit.adios_cellvit_model import ADIOSCellViT
 from adios_cellvit.channel_selector import ChannelSelector
 
@@ -180,8 +180,9 @@ def build_loaders(config):
 
 def run_epoch(model, criterion, loader, optimizer, device, train: bool):
     model.train(mode=train)
-    # Safeguards: even when frozen, ensure no dropout/BN drift.
-    model.encoder.eval()
+    # Selector is frozen — keep it in eval. The mask_model is trainable in
+    # stage 2 (192-dim encoder + UNet decoder both fine-tune at LR 1e-6),
+    # so we deliberately do NOT force it into eval mode here.
     model.selector.eval()
 
     totals = {'xent': 0.0, 'dice': 0.0, 'mse': 0.0, 'msge': 0.0, 'nc': 0.0, 'total': 0.0}
@@ -234,25 +235,21 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     os.makedirs(config['output_dir'], exist_ok=True)
 
-    encoder, mask_decoder = load_adios_backbone_and_decoder(
-        config['adios_checkpoint'], device,
-    )
+    mask_model = load_adios_mask_model(config['adios_checkpoint'], device)
     selector = ChannelSelector(num_masks=3).to(device)
     stage1_ckpt = torch.load(config['stage1_selector'], map_location=device, weights_only=False)
     selector.load_state_dict(stage1_ckpt['selector_state_dict'])
 
     model = ADIOSCellViT(
-        encoder=encoder,
-        mask_decoder=mask_decoder,
+        mask_model=mask_model,
         selector=selector,
-        encoder_dim=768,
         num_classes=config['num_classes'],
         drop_rate=0.1,
         inference_mode='soft',
     ).to(device)
 
     model.freeze_selector()
-    model.unfreeze_mask_decoder()
+    model.unfreeze_mask_model()
 
     criterion = CombinedLossWithNC(config['loss_weights'])
 
@@ -264,7 +261,9 @@ def main():
         + list(model.cellvit.decoder2.parameters())
         + list(model.cellvit.decoder3.parameters())
     )
-    adios_params = list(model.mask_decoder.parameters())
+    # mask_model.parameters() includes both the 192-dim encoder and the UNet
+    # decoder. Both fine-tune at the lower LR (1e-6) per HANDOFF_correction §0.
+    adios_params = list(model.mask_model.parameters())
 
     optimizer = torch.optim.AdamW(
         [
