@@ -25,6 +25,26 @@ Names imported (so the assembly step can verify the symbols match):
 - `cellvit.postproc.benchmarking`: `__proc_np_hv`, `aggregated_jaccard_index`,
   `panoptic_quality_semantic`.
 
+## 1b. ADIOS convention inversion
+
+This project uses the ADIOS MASK MODEL, not the student encoder.
+
+Standard ADIOS (Shi et al. 2022) trains a student encoder adversarially against
+a mask model, then keeps the student and discards the mask model. The user's
+workflow is the inverse: the mask model is kept (it produces visually clean
+nuclei masks across many experiments), the student is discarded.
+
+Practically, this means:
+- `load_adios_mask_model` does NOT load `checkpoint['student']`.
+- The HoVer and NC heads consume features from the 192-dim ViT-Tiny encoder
+  inside the mask model (`mask_model.encoder`), not from the 768-dim student.
+- In stage 2, fine-tuning `mask_model.parameters()` includes both the 192-dim
+  encoder and the UNet decoder. Both are trained at LR 1e-6.
+
+If you're new to this codebase: do not be confused by the small encoder size.
+The 192-dim ViT-Tiny is intentional — it's the encoder the user trusts for
+this task.
+
 ## 2. Modify `cellvit/models.py:CellViT` (HANDOFF §4)
 
 Add the NC (nuclei classification) decoder as a third branch. Concretely:
@@ -116,3 +136,7 @@ python evaluate_pannuke.py \
 imports cleanly without `cellvit/*` being present. On the cluster, after the
 above assembly, all modules including `adios_cellvit.adios_cellvit_model`
 should import cleanly.
+
+The mask model loader is `adios_cellvit.adios_backbone.load_adios_mask_model`
+(see §1b for why; the original `load_adios_backbone_and_decoder` name was
+replaced when the ADIOS-convention inversion was applied).
