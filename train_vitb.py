@@ -468,6 +468,11 @@ def main():
         final_lr=config['heads_lr'] / 10,
         warmup_start_lr=config['heads_lr'] / 100,
     )
+    # WarmupDecayScheduler ignores per-group base_lrs and sets every param
+    # group to the same scalar. We want the encoder (group 1) held constant
+    # at encoder_lr; pin it here (overriding the scheduler ctor's initial
+    # write) and again after each scheduler.step() below.
+    optimizer.param_groups[1]['lr'] = config['encoder_lr']
 
     train_loader, val_loader = build_loaders(config)
 
@@ -480,6 +485,8 @@ def main():
         train_log = run_epoch(model, criterion, train_loader, optimizer, device, train=True)
         val_log = run_epoch(model, criterion, val_loader, optimizer, device, train=False)
         scheduler.step()
+        # Re-pin encoder LR; scheduler.step() overwrote group 1.
+        optimizer.param_groups[1]['lr'] = config['encoder_lr']
 
         lr_hds = optimizer.param_groups[0]['lr']
         lr_enc = optimizer.param_groups[1]['lr']
