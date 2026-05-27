@@ -218,4 +218,17 @@ class ADIOSPanNukeDataset(Dataset):
         instance_mask_t = self.transform_fin(image=instance)['image']
         class_mask_t = torch.from_numpy(class_mask_np).long()
 
+        # INSTANCE_BG_NORMALIZATION: convert from PanNuke's internal convention
+        # (background = max instance ID per patch) to the standard convention
+        # (background = 0, foreground IDs = 1..N).  The helpers _process_mask_binary
+        # and _calculate_distance_maps use the original convention internally
+        # via their own max() lookups, so we normalize only the returned tensor.
+        inst_max = instance_mask_t.max()
+        if inst_max > 0:
+            instance_mask_t = torch.where(
+                instance_mask_t == inst_max,
+                torch.zeros_like(instance_mask_t),
+                instance_mask_t,
+            )
+
         return image, mask_2ch_t, distance_map_t, instance_mask_t, class_mask_t
