@@ -490,11 +490,13 @@ def main():
 
         lr_hds = optimizer.param_groups[0]['lr']
         lr_enc = optimizer.param_groups[1]['lr']
+        # train_cons is the actual consistency-loss contribution (val_cons is
+        # always 0 because model.eval() suppresses the prior forward).
         print(
             f"[vitb] epoch {epoch+1}/{config['epochs']} "
             f"train_total={train_log['total']:.4f} val_total={val_log['total']:.4f} "
             f"val_nc={val_log['nc']:.4f} val_mse={val_log['mse']:.4f} "
-            f"val_cons={val_log['cons']:.4f} "
+            f"train_cons={train_log['cons']:.4f} val_cons={val_log['cons']:.4f} "
             f"lr_enc={lr_enc:.2e} lr_heads={lr_hds:.2e}"
         )
 
