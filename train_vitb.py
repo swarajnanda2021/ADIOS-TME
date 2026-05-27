@@ -450,10 +450,13 @@ def main():
         if id(p) not in encoder_ids and p.requires_grad
     ]
 
+    # Param group ordering matters: WarmupDecayScheduler scales group 0 only
+    # (see comment in train_stage2_cellvit.py). Heads must be group 0 (scheduled,
+    # base_lr=heads_lr); encoder is group 1 (constant at encoder_lr).
     optimizer = torch.optim.AdamW(
         [
-            {'params': encoder_params, 'lr': config['encoder_lr']},
-            {'params': heads_params,   'lr': config['heads_lr']},
+            {'params': heads_params,   'lr': config['heads_lr']},      # group 0 — scheduled
+            {'params': encoder_params, 'lr': config['encoder_lr']},    # group 1 — constant
         ],
         weight_decay=config['weight_decay'],
     )
@@ -478,8 +481,8 @@ def main():
         val_log = run_epoch(model, criterion, val_loader, optimizer, device, train=False)
         scheduler.step()
 
-        lr_enc = optimizer.param_groups[0]['lr']
-        lr_hds = optimizer.param_groups[1]['lr']
+        lr_hds = optimizer.param_groups[0]['lr']
+        lr_enc = optimizer.param_groups[1]['lr']
         print(
             f"[vitb] epoch {epoch+1}/{config['epochs']} "
             f"train_total={train_log['total']:.4f} val_total={val_log['total']:.4f} "
