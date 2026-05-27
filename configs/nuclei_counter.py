@@ -23,16 +23,17 @@ STAGE1 = {
 }
 
 STAGE2 = {
-    'adios_checkpoint':     '<FILL ON CLUSTER>',
+    'adios_checkpoint':     '/data1/vanderbc/nandas1/ADIOS-CellViT/logs/checkpoint_iter_00094000.pth',
     'stage1_selector':      './logs/stage1/stage1_selector.pth',
-    'pannuke_path':         '<FILL ON CLUSTER>',
+    'pannuke_path':         '/data1/vanderbc/test_dinov2_swaraj/ADIOS/data/pannuke',
     'output_dir':           './logs/stage2',
     'magnification':        '40x',
-    'batch_size':           16,
+    'batch_size':           32,
     'num_workers':          4,
     'max_epochs':           50,
     'lr_heads':             1e-4,
-    'lr_adios_decoder':     1e-6,
+    'lr_adios_encoder':     1e-5,
+    'lr_adios_decoder':     1e-4,
     'weight_decay':         1e-5,
     'warmup_epochs':        5,
     'val_split':            0.2,

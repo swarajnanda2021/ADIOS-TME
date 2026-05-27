@@ -38,9 +38,24 @@ class CombinedLossWithNC(nn.Module):
         super().__init__()
         self.w = weights
 
+    # PATH_Z_DENSE: dense per-pixel supervision restored.  Higher decoder LR
+    # (1e-4) lets the decoder adapt away from its noisy ADIOS-pretrained shape.
+
     @staticmethod
-    def _msge_loss(pred_dist: torch.Tensor, true_dist: torch.Tensor) -> torch.Tensor:
-        # Squared error of spatial gradients of the H/V maps.
+    def _xentropy_2ch(prob_2ch, true_2ch):
+        eps = 1e-7
+        prob = prob_2ch.clamp(min=eps, max=1.0 - eps)
+        return -(true_2ch * prob.log()).sum(dim=1).mean()
+
+    @staticmethod
+    def _dice_loss(prob_2ch, true_2ch):
+        eps = 1e-6
+        inter = (prob_2ch * true_2ch).sum(dim=(0, 2, 3))
+        union = prob_2ch.sum(dim=(0, 2, 3)) + true_2ch.sum(dim=(0, 2, 3))
+        return 1.0 - ((2.0 * inter + eps) / (union + eps)).mean()
+
+    @staticmethod
+    def _msge_loss(pred_dist, true_dist):
         kx = torch.tensor(
             [[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]],
             device=pred_dist.device,
@@ -56,27 +71,14 @@ class CombinedLossWithNC(nn.Module):
         gy_t = F.conv2d(true_dist, ky_full, padding=1, groups=C)
         return ((gx_p - gx_t) ** 2 + (gy_p - gy_t) ** 2).mean()
 
-    @staticmethod
-    def _dice_loss(prob_2ch: torch.Tensor, true_2ch: torch.Tensor) -> torch.Tensor:
-        eps = 1e-6
-        inter = (prob_2ch * true_2ch).sum(dim=(0, 2, 3))
-        union = prob_2ch.sum(dim=(0, 2, 3)) + true_2ch.sum(dim=(0, 2, 3))
-        return 1.0 - ((2.0 * inter + eps) / (union + eps)).mean()
-
-    @staticmethod
-    def _xentropy_2ch(prob_2ch: torch.Tensor, true_2ch: torch.Tensor) -> torch.Tensor:
-        eps = 1e-7
-        prob = prob_2ch.clamp(min=eps, max=1.0 - eps)
-        return -(true_2ch * prob.log()).sum(dim=1).mean()
-
     def forward(
         self,
-        true_mask: torch.Tensor,   # [B, 2, H, W] one-hot
-        pred_mask: torch.Tensor,   # [B, 1, H, W] probability in [0, 1]
-        true_dist: torch.Tensor,   # [B, 2, H, W]
-        pred_dist: torch.Tensor,   # [B, 2, H, W] raw
-        true_class: torch.Tensor,  # [B, H, W] long
-        pred_class: torch.Tensor,  # [B, K, H, W] raw
+        true_mask: torch.Tensor,
+        pred_mask: torch.Tensor,
+        true_dist: torch.Tensor,
+        pred_dist: torch.Tensor,
+        true_class: torch.Tensor,
+        pred_class: torch.Tensor,
     ):
         prob_fg = pred_mask.clamp(0.0, 1.0)
         prob_bg = 1.0 - prob_fg
@@ -184,7 +186,7 @@ def run_epoch(model, criterion, loader, optimizer, device, train: bool):
 
     grad_ctx = torch.enable_grad() if train else torch.no_grad()
     with grad_ctx:
-        for image, mask_2ch, distance_map, _, class_mask in loader:
+        for image, mask_2ch, distance_map, _instance, class_mask in loader:
             image = image.to(device, non_blocking=True)
             mask_2ch = mask_2ch.to(device, non_blocking=True).float()
             distance_map = distance_map.to(device, non_blocking=True).float()
@@ -255,14 +257,20 @@ def main():
         + list(model.cellvit.decoder2.parameters())
         + list(model.cellvit.decoder3.parameters())
     )
-    # mask_model.parameters() includes both the 192-dim encoder and the UNet
-    # decoder. Both fine-tune at the lower LR (1e-6) per HANDOFF_correction §0.
-    adios_params = list(model.mask_model.parameters())
+    # Split mask_model into encoder (LR 1e-5) and decoder (LR 1e-4) groups.
+    # Higher decoder LR lets it adapt away from the noisy ADIOS-pretrained
+    # shape; the encoder still gets modest adaptation while preserving features.
+    adios_encoder_params = list(model.mask_model.encoder.parameters())
+    adios_decoder_params = [
+        p for n, p in model.mask_model.named_parameters()
+        if not n.startswith('encoder.')
+    ]
 
     optimizer = torch.optim.AdamW(
         [
             {'params': heads_params, 'lr': config['lr_heads']},
-            {'params': adios_params, 'lr': config['lr_adios_decoder']},
+            {'params': adios_encoder_params, 'lr': config['lr_adios_encoder']},
+            {'params': adios_decoder_params, 'lr': config['lr_adios_decoder']},
         ],
         weight_decay=config['weight_decay'],
     )
