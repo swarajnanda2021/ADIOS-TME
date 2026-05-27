@@ -23,6 +23,7 @@ from adios_cellvit.adios_backbone import load_adios_mask_model
 from adios_cellvit.channel_selector import (
     ChannelSelector,
     compute_best_channel_target,
+    compute_soft_channel_target,
 )
 from adios_cellvit.pannuke_dataset import ADIOSPanNukeDataset
 
@@ -109,9 +110,26 @@ def run_epoch(selector, mask_model, loader, optimizer, device, train: bool):
             with torch.no_grad():
                 mask_output = mask_model(image)['masks']
 
-            target = compute_best_channel_target(mask_output, gt_binary)
+            # Channel scrambling: per-sample random permutation of the 3 mask
+            # channels.  Forces the selector to learn nuclei-vs-not from channel
+            # content rather than from channel index.  The target is computed on
+            # the permuted tensor so it tracks the permutation automatically
+            # (compute_best_channel_target is symmetric in channels).
+            B = mask_output.shape[0]
+            N = mask_output.shape[1]
+            H, W = mask_output.shape[-2:]
+            perms = torch.stack([torch.randperm(N) for _ in range(B)]).to(mask_output.device)
+            perm_idx = perms.view(B, N, 1, 1).expand(B, N, H, W)
+            mask_output = torch.gather(mask_output, dim=1, index=perm_idx)
+
+            # SOFT_TARGET_KL: KL divergence between log-softmax(logits) and
+            # the IoU-derived soft target.  Accuracy is reported against the
+            # hardened soft target (argmax) for comparability with previous runs.
+            soft_target = compute_soft_channel_target(mask_output, gt_binary)
+            target = soft_target.argmax(dim=1)
             channel_logits = selector(mask_output)
-            loss = F.cross_entropy(channel_logits, target)
+            log_probs = F.log_softmax(channel_logits, dim=1)
+            loss = F.kl_div(log_probs, soft_target, reduction='batchmean')
 
             if train:
                 optimizer.zero_grad()

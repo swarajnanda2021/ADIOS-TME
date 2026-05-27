@@ -25,25 +25,30 @@ class ChannelSelector(nn.Module):
         super().__init__()
         self.num_masks = num_masks
 
+        # BEEFIER_SELECTOR_V2: deeper, wider stack (~250K params vs ~14K before).
         self.features = nn.Sequential(
-            nn.Conv2d(num_masks, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(4, 16),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(num_masks, 32, kernel_size=3, padding=1),
             nn.GroupNorm(8, 32),
             nn.ReLU(inplace=True),
 
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.GroupNorm(8, 64),
             nn.ReLU(inplace=True),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, 128),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, 128),
+            nn.ReLU(inplace=True),
         )
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64, 32),
+            nn.Linear(128, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(32, num_masks),
+            nn.Linear(64, num_masks),
         )
 
         self._init_weights()
@@ -124,3 +129,46 @@ def compute_best_channel_target(
     union = (pred_bin + gt - pred_bin * gt).sum(dim=(-1, -2)).clamp(min=1e-6)
     iou = intersection / union
     return iou.argmax(dim=1).long()
+
+
+
+def compute_soft_channel_target(
+    mask_output: torch.Tensor,
+    gt_binary: torch.Tensor,
+    threshold: float = 0.5,
+    fallback_uniform_when_iou_below: float = 0.05,
+) -> torch.Tensor:
+    """Stage 1 target as a normalized IoU distribution over channels.
+
+    Returns a probability distribution per sample rather than a single index.
+    This honestly represents ambiguity: if two channels both have IoU 0.5, the
+    target says ``[0.5, 0.5, 0.0]`` rather than committing to one.
+
+    Args:
+        mask_output: ``[B, N, H, W]`` post-softmax probabilities.
+        gt_binary:   ``[B, H, W]`` in {0, 1}.
+        threshold:   binarization threshold for ``mask_output``.
+        fallback_uniform_when_iou_below:
+            if every channel has IoU below this value, the patch is essentially
+            background-only; return a uniform distribution instead of dividing
+            by ~0.
+
+    Returns:
+        ``FloatTensor [B, N]`` rows summing to 1.
+    """
+    gt = gt_binary.unsqueeze(1)
+    pred_bin = (mask_output > threshold).float()
+    intersection = (pred_bin * gt).sum(dim=(-1, -2))
+    union = (pred_bin + gt - pred_bin * gt).sum(dim=(-1, -2)).clamp(min=1e-6)
+    iou = intersection / union  # [B, N]
+
+    total = iou.sum(dim=1, keepdim=True)
+    has_signal = (iou.max(dim=1, keepdim=True).values > fallback_uniform_when_iou_below).float()
+
+    # Where signal exists: normalize IoUs to a distribution.
+    # Where signal is absent: use uniform.
+    N = iou.shape[1]
+    safe_total = total.clamp(min=1e-6)
+    normalized = iou / safe_total
+    uniform = torch.full_like(iou, 1.0 / N)
+    return has_signal * normalized + (1.0 - has_signal) * uniform

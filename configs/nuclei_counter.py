@@ -5,18 +5,18 @@ cluster assembly step still has paths to fill in.
 """
 
 STAGE1 = {
-    'adios_checkpoint':     '<FILL ON CLUSTER>',
-    'pannuke_path':         '<FILL ON CLUSTER>',
+    'adios_checkpoint':     '/data1/vanderbc/nandas1/ADIOS-CellViT/logs/checkpoint_iter_00094000.pth',
+    'pannuke_path':         '/data1/vanderbc/test_dinov2_swaraj/ADIOS/data/pannuke',
     'output_dir':           './logs/stage1',
     'magnification':        '40x',
     'batch_size':           32,
     'num_workers':          4,
-    'max_epochs':           20,
+    'max_epochs':           60,
     'lr':                   1e-4,
     'weight_decay':         1e-5,
     'warmup_epochs':        2,
     'val_split':            0.2,
-    'early_stop_patience':  5,
+    'early_stop_patience':  15,
     'normalize_mean':       (0.6816, 0.5640, 0.7232),
     'normalize_std':        (0.1617, 0.1714, 0.1389),
     'seed':                 42,
