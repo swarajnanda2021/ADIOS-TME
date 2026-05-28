@@ -134,11 +134,16 @@ STAGE_CELLVITPP = {
     'early_stop_patience':   15,   # break loop if val_total hasn't improved in N epochs
     'use_adios_consistency': True,
     'lambda_adios':          0.1,
+    # HV-weight tuning: mirror STAGE2's known-working values
+    # (w_mse=2.5, w_msge=8.0). The defaults 1.0/1.0 in earlier B-2 / B-3
+    # runs left val_mse pegged at ~0.0145 and produced under-detection
+    # (count bias -6 to -7).  MSGE in particular drives sharp HV-map
+    # boundaries, which watershed needs for instance separation.
     'loss_weights': {
         'w_xentropy': 1.0,
         'w_dice':     1.0,
-        'w_mse':      1.0,
-        'w_msge':     1.0,
+        'w_mse':      2.5,
+        'w_msge':     8.0,
         'w_nc':       1.0,
     },
 }
