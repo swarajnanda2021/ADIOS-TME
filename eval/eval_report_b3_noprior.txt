@@ -1,0 +1,96 @@
+==============================================================================
+  ViTBCellViTPP Evaluation Report (v3_cellvitpp)
+==============================================================================
+
+--- Section 1: Setup ---
+  Checkpoint:       ./logs/cellvitpp_noprior/cellvitpp.pth
+  ViT-B encoder:    /data1/vanderbc/test_dinov2_swaraj/FMC_ViT-B_baseline/logs/checkpoint_iter_00150000.pth
+  Param count:      142,548,939
+  Test patches:     2722
+  Batch size:       8
+  Device:           cuda
+  IoU match thresh: 0.5
+  Eval time:        138.6s (0.05s/patch)
+
+--- Section 2: NP pixel-level metrics ---
+  GT-foreground pixels:          23,535,505
+  Predicted-foreground pixels:   24,570,065
+  Intersection:                  20,200,564
+  Predicted-only (extras):        4,369,501
+  GT-only (missed):               3,334,941
+
+  IoU:               0.7239
+  Recall:            0.8583
+  Precision:         0.8222
+  Extras-ratio:      0.1857
+
+--- Section 3: Instance metrics (post-watershed) ---
+  Mean GT count/patch:    19.84   (std 16.57)
+  Mean pred count/patch:  12.90   (std 10.33)
+  Count MAE (|pred-gt|):  7.02
+  Count bias (pred-gt):   -6.94
+  AJI:                    0.4434  +/- 0.1926
+
+  Instance PQ (global, IoU>=0.5 matching):
+    matched pairs (TP):    25291
+    unmatched pred (FP):   9827
+    unmatched GT   (FN):   28707
+    SQ (mean IoU on TPs):  0.7264
+    RQ (det F1-like):      0.5676
+    PQ (SQ x RQ):          0.4123
+
+  Per-class instance PQ:
+             class    TP    FP    FN       SQ       RQ       PQ
+        neoplastic  8809  5736 14251    0.735    0.469    0.344
+      inflammatory  4650  3585  4052    0.751    0.549    0.412
+        connective  2863  2971 11233    0.697    0.287    0.200
+              dead   183   542   657    0.698    0.234    0.163
+        epithelial  3256  2523  3892    0.715    0.504    0.360
+
+  Count-error histogram:
+        <=-5:  1405  #########################
+      -4..-2:   726  #############
+          -1:   229  ####
+           0:   291  #####
+          +1:    45
+      +2..+4:    24
+        >=+5:     2
+
+--- Section 4: Classification quality on matched instances (IoU > thresh) ---
+  Matched pairs:  25291
+
+  Confusion matrix (rows=GT, cols=Pred; only foreground classes):
+              | pred 0 | pred 1 | pred 2 | pred 3 | pred 4 | pred 5 |
+  ----------------------------------------------------------------------------
+    gt 1 neoplas |      0 |   8809 |    682 |    530 |    275 |    222 |
+    gt 2 inflamm |      0 |    211 |   4650 |    349 |     32 |    185 |
+    gt 3 connect |      0 |    610 |   1269 |   2863 |     87 |    478 |
+    gt 4    dead |      0 |      5 |     26 |     14 |    183 |      0 |
+    gt 5 epithel |      0 |    188 |    146 |    150 |      2 |   3256 |
+
+  Per-class P/R/F1:
+             class     tp     fp     fn         P        R       F1
+        neoplastic   8809   1014   1709     0.897    0.838    0.866
+      inflammatory   4650   2123    777     0.687    0.857    0.762
+        connective   2863   1043   2444     0.733    0.539    0.622
+              dead    183    396     45     0.316    0.803    0.454
+        epithelial   3256    885    486     0.786    0.870    0.826
+  Macro-F1 (foreground only): 0.7059
+
+--- Section 5: Extras ---
+  Total extras across test set: 9827
+  Mean extras / patch:          3.61
+
+  MLP-predicted class on extras (cells are foreground-only, so no class-0 extras):
+    class 0    background:     0  (0.000)
+    class 1    neoplastic:  4696  (0.478)  ############################
+    class 2  inflammatory:  1446  (0.147)  ########
+    class 3    connective:  1917  (0.195)  ###########
+    class 4          dead:   144  (0.015)
+    class 5    epithelial:  1624  (0.165)  #########
+
+--- Section 6: Summary ---
+  Path A (PanNuke benchmark):  AJI=0.443  PQ=0.412  count_MAE=7.02
+  Path B (product use case):   NP recall=0.858  NP precision=0.822  NC macro-F1=0.706
+
+==============================================================================
