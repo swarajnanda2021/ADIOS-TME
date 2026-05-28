@@ -86,6 +86,7 @@ STAGE_VITB = {
     'heads_lr':              1e-4,
     'weight_decay':          1e-5,
     'warmup_epochs':         2,
+    'early_stop_patience':   15,   # break loop if val_total hasn't improved in N epochs
     'use_adios_consistency': True,
     'lambda_adios':          0.1,
     'loss_weights': {
