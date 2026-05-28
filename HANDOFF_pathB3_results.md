@@ -24,26 +24,27 @@ consistent with the smaller effective per-batch loss footprint.
 
 ## Headline metrics
 
-| metric                | Path Z | B-2 +cons | **B-2 no-cons** | B-3 +cons | B-3 no-cons |
-|-----------------------|--------|-----------|-----------------|-----------|-------------|
-| AJI                   | 0.448  | 0.407     | **0.481**       | 0.404     | 0.443       |
-| Instance PQ           | 0.426  | 0.361     | **0.448**       | 0.354     | 0.412       |
-| NP IoU                | 0.730  | 0.722     | 0.721           | 0.719     | 0.724       |
-| NP recall             | 0.858  | 0.851     | 0.863           | 0.850     | 0.858       |
-| NP precision          | 0.830  | 0.826     | 0.814           | 0.824     | 0.822       |
-| NC macro-F1           | 0.626  | **0.748** | 0.737           | 0.676     | 0.706       |
-| neoplastic recall     | 0.52   | 0.834     | 0.833           | 0.806     | 0.838       |
-| inflammatory recall   | 0.55   | 0.876     | 0.877           | 0.851     | 0.857       |
-| **connective recall** | 0.32   | 0.639     | **0.646**       | 0.490     | **0.539**   |
-| dead recall           | 0.00   | 0.844     | 0.812           | 0.642     | 0.803       |
-| epithelial recall     | 0.50   | 0.886     | 0.870           | 0.894     | 0.870       |
-| count MAE             | 5.95   | 7.35      | 6.52            | 7.34      | 7.02        |
-| count bias            | -5.85  | -7.19     | -6.41           | -7.23     | -6.94       |
-| matched pairs (TP)    | -      | 22256     | 27549           | 22123     | 25291       |
+| metric                | Path Z | B-2 +cons | **B-2 no-cons** | B-3 +cons | B-3 no-cons | B-2 + HV-fix |
+|-----------------------|--------|-----------|-----------------|-----------|-------------|--------------|
+| AJI                   | 0.448  | 0.407     | **0.481**       | 0.404     | 0.443       | 0.471        |
+| Instance PQ           | 0.426  | 0.361     | **0.448**       | 0.354     | 0.412       | 0.437        |
+| NP IoU                | 0.730  | 0.722     | 0.721           | 0.719     | 0.724       | 0.727        |
+| NP recall             | 0.858  | 0.851     | 0.863           | 0.850     | 0.858       | 0.860        |
+| NP precision          | 0.830  | 0.826     | 0.814           | 0.824     | 0.822       | 0.825        |
+| NC macro-F1           | 0.626  | **0.748** | 0.737           | 0.676     | 0.706       | 0.730        |
+| neoplastic recall     | 0.52   | 0.834     | 0.833           | 0.806     | 0.838       | 0.811        |
+| inflammatory recall   | 0.55   | 0.876     | 0.877           | 0.851     | 0.857       | 0.851        |
+| **connective recall** | 0.32   | 0.639     | 0.646           | 0.490     | 0.539       | **0.694**    |
+| dead recall           | 0.00   | 0.844     | 0.812           | 0.642     | 0.803       | 0.677        |
+| epithelial recall     | 0.50   | 0.886     | 0.870           | 0.894     | 0.870       | 0.883        |
+| count MAE             | 5.95   | 7.35      | 6.52            | 7.34      | 7.02        | **6.17**     |
+| count bias            | -5.85  | -7.19     | -6.41           | -7.23     | -6.94       | -6.04        |
+| matched pairs (TP)    | -      | 22256     | 27549           | 22123     | 25291       | 27588        |
 
-**Best of the five: B-2 no-cons remains.** Per-cell pooling did not
-deliver a classification win; it lost ~0.03 macro-F1 vs the per-pixel
-head while also losing ~0.04 AJI / PQ.
+**Best of the six: still B-2 no-cons by a hair on AJI/PQ.** B-2 + HV-fix
+is within ±0.01 of B-2 no-cons on every macro metric — essentially a
+tie on PanNuke, with a small per-class redistribution (connective
+recall lifted +0.048, dead recall regressed -0.135).
 
 ## Findings
 
@@ -103,38 +104,88 @@ nothing to val improvement. With-cons just reached the floor 6 epochs
 earlier.
 
 ## Current best configuration
-**Path B-2 no-cons** remains the reference baseline. AJI 0.481,
-PQ 0.448, NC macro-F1 0.737. All five classes detected at recall ≥ 0.65.
+**Path B-2 no-cons** remains the reference baseline by a hair (AJI 0.481
+vs B-2+HVfix's 0.471). The B-2 + HV-fix run is essentially tied on
+macro metrics but moves per-class metrics around: connective recall
+lifted +0.048, dead recall regressed -0.135.
+
+For the *clinical-counting* objective specifically, B-2 + HV-fix is
+arguably preferred — count MAE drops 6.52 → 6.17, count bias improves
+-6.41 → -6.04. Real-cells-per-patch is closer.
+
+## Finding 4: HV-fix is not the silver bullet for AJI/PQ
+
+Hypothesis at iteration start: under-weighted MSGE (1.0 vs Path Z's
+8.0) was the dominant detection bottleneck; fixing it would deliver
+AJI +0.03-0.07. The B-2 + HV-fix run did NOT confirm this:
+
+- AJI: 0.481 → 0.471 (-0.010)
+- PQ: 0.448 → 0.437 (-0.011)
+- Count MAE: 6.52 → 6.17 (-0.35, real but modest improvement)
+- Connective recall: 0.646 → 0.694 (+0.048, the expected boundary-sharpening effect)
+- Dead recall: 0.812 → 0.677 (-0.135, the unexpected collapse)
+
+The HV regression *did* converge to a lower val_mse floor (0.0142 vs
+0.0145 for B-3 — modest), so the loss did what it was supposed to do
+on its own target. The downstream effect on instance metrics was
+smaller than expected because:
+
+1. **Dead-class collapse**: rare-class cells (dead, ~840 in test) need
+   strong NC gradient pull. With w_msge bumped from 1.0 to 8.0, the
+   NC term's relative contribution to total loss dropped from ~20%
+   (one of five equal-weighted) to ~7.5% (one of 13.5-equivalent).
+   Tiny dead nuclei were further fragmented by sharper HV gradients
+   and watershed dropped some as too-small.
+2. **PanNuke detection is near a representation ceiling**: the encoder
+   + per-pixel-decoder + watershed combination has a structural limit
+   that boundary sharpness alone can't break. Two earlier signals
+   pointed here: the watershed parameter sweep found defaults near-
+   optimal, and NP IoU plateaued near 0.72 across all six runs.
+
+The real detection ceiling on PanNuke is probably representation
+quality (encoder, decoder capacity) or data noise (PanNuke's
+inter-annotator variance), not loss weighting. HV-fix is therefore
+**not a wasted experiment** — connective recall +0.048 and count MAE
+-0.35 are real wins — but it's also not the lever to break through
+the AJI ceiling on this dataset.
 
 ## Open questions / next-step plan
 
-The per-class story argues *for* cell-context attention, not against
-per-cell pooling: the classes that regressed in B-3 are exactly the
-classes where inter-cell spatial context should help most. The
-per-cell pooled MLP threw out cross-cell context; an attention block
-over cells gets it back.
+Updated in light of finding (4): the two-stream plan (cell-context
+attention + multi-dataset 10-class) is now the path forward.
 
-Reordered priorities:
+1. **Cell-context attention** (Stream A, marquee architecture
+   experiment, new branch). Per-cell pooled tokens + 2D positional
+   encoding from centroids + 1-2 self-attention layers over cells +
+   MLP head. End-to-end trainable. Tests whether spatial cell context
+   rescues connective + dead classes that suffered in B-3. If it
+   recovers connective recall via inter-cell spatial reasoning, the
+   per-cell architecture earns its keep. Otherwise, per-pixel is the
+   permanent architecture.
 
-1. **B-2 no-cons + HV-weight fix** (next experiment, cluster-side).
-   Re-run the existing B-2 architecture with `w_mse=2.5, w_msge=8.0`
-   to address the detection bottleneck (count bias -6.4 → expected
-   lower) and likely become the new strongest reference baseline.
-   Single config knob; expected AJI/PQ +0.03-0.07 on top of B-2 no-cons.
-   Run in parallel to (2) below if compute allows.
+2. **Multi-dataset 10-class with per-pixel NC head** (Stream B, the
+   lab's actual ask). Extend the existing B-2 architecture's NC
+   decoder output from 6 channels to 11 (background + 10 unified
+   classes). Train end-to-end on PanNuke + Lizard + CoNSeP +
+   MoNuSAC combined with soft-target CE for ambiguous superclass
+   labels (PanNuke "inflammatory" → uniform over {lymph, plasma,
+   neutrophil, eosinophil, macrophage}). This is informed by the
+   observation that val_nc saturated at ~0.55 on 6 classes during
+   B-2+HVfix training — the classifier has spare capacity that more
+   classes would consume.
 
-2. **B-3 + HV-weight fix** (already queued, separate run).
-   Tests whether the detection lever lifts B-3 to parity with B-2.
-   Likely closes some of the AJI gap but won't recover the connective
-   classification regression — that's an NC-head-architecture
-   question, not a detection-weight question.
+3. **HV weighting choice for Stream B**: start from B-2 no-cons's
+   1.0/1.0 rather than HV-fix's 2.5/8.0. The dead-class collapse
+   pattern will likely repeat on a 10-class taxonomy with more rare
+   classes (eosinophil, plasma, dead). Alternatively keep 2.5/8.0
+   and bump w_nc to 2.5 to compensate the relative weight. Cleaner
+   to start with defaults; tune in a follow-up.
 
-3. **Cell-context attention** (new branch). The marquee experiment.
-   Per-cell pooled tokens + 2D positional encoding from centroids +
-   1-2 self-attention layers over cells + MLP head. End-to-end
-   trainable. If this recovers connective recall via inter-cell
-   spatial reasoning, the per-cell architecture earns its keep.
-   If it doesn't, revert to per-pixel.
+Streams A and B are **orthogonal and can run in parallel**. If both
+win individually, their wins compose. Cell-context attention is
+PanNuke-only (architecture isolation); multi-dataset 10-class is
+data-only (architecture unchanged). Combining them requires both
+landed, then a final integration run.
 
 ## Infrastructure changes landed this round
 

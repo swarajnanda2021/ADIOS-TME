@@ -1,0 +1,102 @@
+==============================================================================
+  ViTBCellViT Evaluation Report (v2_vitb)
+==============================================================================
+
+--- Section 1: Setup ---
+  Checkpoint:       ./logs/vitb_pathb2_hvfix/vitb_pathb2.pth
+  ViT-B encoder:    /data1/vanderbc/test_dinov2_swaraj/FMC_ViT-B_baseline/logs/checkpoint_iter_00150000.pth
+  Param count:      142,251,978
+  Test patches:     2722
+  Batch size:       8
+  Device:           cuda
+  IoU match thresh: 0.5
+  Eval time:        142.1s (0.05s/patch)
+
+--- Section 2: NP pixel-level metrics (binary nuclei map vs PanNuke) ---
+  GT-foreground pixels:          23,535,505
+  Predicted-foreground pixels:   24,528,002
+  Intersection:                  20,229,863
+  Predicted-only (extras):        4,298,139
+  GT-only (missed):               3,305,642
+
+  IoU:               0.7268
+  Recall:            0.8595   (of PanNuke nuclei, fraction model finds)
+  Precision:         0.8248   (of model predictions, fraction PanNuke labels)
+  Extras-ratio:      0.1826   (extras px / GT px)
+
+--- Section 3: Instance metrics (post-watershed) ---
+  Mean GT count/patch:    19.84   (std 16.57)
+  Mean pred count/patch:  13.80   (std 10.73)
+  Count MAE (|pred-gt|):  6.17
+  Count bias (pred-gt):   -6.04   (positive = over-predicting)
+  AJI:                    0.4712  +/- 0.1944  (per-patch mean)
+
+  Instance PQ (global, IoU>=0.5 matching, standard panoptic definition):
+    matched pairs (TP):    27588
+    unmatched pred (FP):   9971
+    unmatched GT   (FN):   26410
+    SQ (mean IoU on TPs):  0.7254
+    RQ (det F1-like):      0.6026
+    PQ (SQ x RQ):          0.4372
+
+  Per-class instance PQ (class assignment via per-instance modal NC):
+             class    TP    FP    FN       SQ       RQ       PQ
+        neoplastic  9393  4650 13667    0.743    0.506    0.376
+      inflammatory  4815  3498  3887    0.739    0.566    0.418
+        connective  4192  4431  9904    0.697    0.369    0.257
+              dead   126   350   714    0.675    0.191    0.129
+        epithelial  3579  2524  3569    0.717    0.540    0.387
+
+  Count-error histogram:
+        <=-5:  1208  ######################
+      -4..-2:   785  ##############
+          -1:   282  #####
+           0:   335  ######
+          +1:    73  #
+      +2..+4:    37
+        >=+5:     2
+
+--- Section 4: Classification quality on matched instances (IoU > thresh) ---
+  Matched pairs:  27588
+
+  Confusion matrix (rows=GT, cols=Pred; only foreground classes):
+              | pred 0 | pred 1 | pred 2 | pred 3 | pred 4 | pred 5 |
+  ----------------------------------------------------------------------------
+    gt 1 neoplas |      0 |   9393 |    806 |    817 |    177 |    391 |
+    gt 2 inflamm |      0 |    139 |   4815 |    510 |     14 |    177 |
+    gt 3 connect |      0 |    413 |   1079 |   4192 |     44 |    309 |
+    gt 4    dead |      0 |      5 |     39 |     16 |    126 |      0 |
+    gt 5 epithel |      0 |    175 |    146 |    153 |      0 |   3579 |
+
+  Per-class P/R/F1:
+             class     tp     fp     fn         P        R       F1
+        neoplastic   9393    732   2191     0.928    0.811    0.865
+      inflammatory   4815   2070    840     0.699    0.851    0.768
+        connective   4192   1496   1845     0.737    0.694    0.715
+              dead    126    235     60     0.349    0.677    0.461
+        epithelial   3579    877    474     0.803    0.883    0.841
+  Macro-F1 (foreground only): 0.7301
+
+--- Section 5: Extras (predicted instances with no GT match) ---
+  Total extras across test set: 9971
+  Mean extras / patch:          3.66
+
+  NC prediction on extras:
+    class 0    background:     1  (0.000)
+    class 1    neoplastic:  3889  (0.390)  #######################
+    class 2  inflammatory:  1412  (0.142)  ########
+    class 3    connective:  2925  (0.293)  #################
+    class 4          dead:   113  (0.011)
+    class 5    epithelial:  1631  (0.164)  #########
+
+  Interpretation: extras predicted as class 0 (background) will be
+  surfaced to the user as "unknown nucleus" via the post-hoc rule.
+  High class-0 share = the rule works; high other-class shares = the
+  rule is less effective and fellows would see noisy classifications.
+
+--- Section 6: Summary ---
+  Path A (PanNuke benchmark):  AJI=0.471  PQ=0.437  count_MAE=6.17
+  Path B (product use case):   NP recall=0.860  NP precision=0.825  NC macro-F1=0.730
+  Extras:                      9971 total (3.66/patch); 0% predicted as background ("unknown")
+
+==============================================================================
