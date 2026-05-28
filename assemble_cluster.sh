@@ -338,60 +338,73 @@ else
     ok "Patched $DATASETS_PY (mask slice 3:4 → 3:)"
 fi
 
-# C.1.2: cellvit/postproc/benchmarking.py — namespace-qualify the four
-# bare imports near the top of the file. PostProc was written assuming
-# a flat sys.path; in this project layout `from utils import ...`
-# resolves to the wrong file.
+# C.1.2: cellvit/postproc/benchmarking.py — namespace-qualify all bare
+# imports of utils / datasets / models. PostProc was written assuming a
+# flat sys.path; in this project layout `from utils import ...` resolves
+# to the project-root utils.py (the DINOv2 fork's), which lacks
+# set_seed / WarmupDecayScheduler.  Anchor-free regex rewrite — tolerant
+# of PostProc source reordering.  Hard-fails if zero rewrites apply, so
+# future drift surfaces at assemble time instead of during eval.
 BENCH_PY="$WORK_DIR/cellvit/postproc/benchmarking.py"
-if grep -q "CELLVIT_NAMESPACE_FIX" "$BENCH_PY"; then
-    skip "cellvit/postproc/benchmarking.py already patched (namespaces)"
+# Idempotency: after a successful patch the file contains
+# `from cellvit.utils import …` at line start. On re-run, skip.
+if grep -q "^from cellvit\.utils import" "$BENCH_PY" 2>/dev/null; then
+    skip "cellvit/postproc/benchmarking.py already namespace-qualified"
 else
-    BENCH_PY="$BENCH_PY" python3 - <<'NSEOF'
-import os
-path = os.environ['BENCH_PY']
+    python3 - <<'NSEOF'
+import re
+
+path = "cellvit/postproc/benchmarking.py"
 with open(path) as f:
     src = f.read()
+orig = src
 
-old = """# Import custom modules
-from utils import set_seed, load_dino_backbone, WarmupDecayScheduler
+# In this project layout, bare `from utils import X` etc. resolve to the
+# project root's utils.py (the DINOv2 fork's), not to the vendored cellvit
+# package. Rewrite every bare import of these three modules to its
+# cellvit-qualified form. This is anchor-free; if the PostProc source
+# adds, removes, or reorders imports, the patch still applies.
+modules = ('utils', 'datasets', 'models')
 
-from datasets import (
-    MHISTDataset, CRCDataset, PCamDataset,
-    PanNukeDataset, MonuSegDataset,
-    BRACSDataset, MiDOGDataset,
-    GLASDataset, BCSSDataset
-)
+# Form 1: `from X import …`
+for m in modules:
+    src = re.sub(
+        rf"(^\s*)from {m} import",
+        rf"\1from cellvit.{m} import",
+        src,
+        flags=re.MULTILINE,
+    )
 
-from datasets import (SynchronizedTransform, DinoTransforms)
-from models import CellViT, CellViTMultiClass
-from utils import (calculate_rankme_metric, calculate_clid_metric,
-                  calculate_lidar_metric, calculate_alphareq_metric)"""
+# Form 2: bare `import X` (not `import X.Y`, not `import X as Y`)
+for m in modules:
+    src = re.sub(
+        rf"(^\s*)import {m}(\s*$|\s+#)",
+        rf"\1import cellvit.{m} as {m}\2",
+        src,
+        flags=re.MULTILINE,
+    )
 
-new = """# CELLVIT_NAMESPACE_FIX: PostProc used bare imports (from utils import ...)
-# that assume a flat sys.path. In this project layout they resolve to the
-# wrong top-level utils.py; namespace-qualify all cellvit-internal imports.
-from cellvit.utils import set_seed, load_dino_backbone, WarmupDecayScheduler
+if src == orig:
+    raise SystemExit(
+        "benchmarking.py namespace patch: no bare imports found to rewrite. "
+        "Either the PostProc source already qualifies them (in which case "
+        "remove this PHASE C step) or the module names have changed."
+    )
 
-from cellvit.datasets import (
-    MHISTDataset, CRCDataset, PCamDataset,
-    PanNukeDataset, MonuSegDataset,
-    BRACSDataset, MiDOGDataset,
-    GLASDataset, BCSSDataset
-)
-
-from cellvit.datasets import (SynchronizedTransform, DinoTransforms)
-from cellvit.models import CellViT, CellViTMultiClass
-from cellvit.utils import (calculate_rankme_metric, calculate_clid_metric,
-                           calculate_lidar_metric, calculate_alphareq_metric)"""
-
-if old not in src:
-    raise SystemExit("benchmarking.py namespace-patch anchor not found; manual inspection required")
-src = src.replace(old, new, 1)
 with open(path, 'w') as f:
     f.write(src)
-print(f"Patched {path} (namespace-qualified four imports)")
+
+# Report what changed for log readability.
+changed = [
+    (i + 1, a, b)
+    for i, (a, b) in enumerate(zip(orig.splitlines(), src.splitlines()))
+    if a != b
+]
+print(f"Patched {path}: {len(changed)} line(s) namespace-qualified")
+for lineno, before, after in changed:
+    print(f"  line {lineno}: {before.strip()!r} -> {after.strip()!r}")
 NSEOF
-    ok "Patched $BENCH_PY (namespace-qualified imports)"
+    ok "Patched $BENCH_PY (namespace-qualified imports via regex)"
 fi
 
 # =============================================================================
