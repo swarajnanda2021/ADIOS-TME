@@ -1,4 +1,10 @@
-"""Path B-3 (CellViT++) evaluation on PanNuke Test.
+"""Path B-3 (CellViT++) / Stream A (cell-context) evaluation on PanNuke Test.
+
+The model head is selected from the checkpoint's embedded config: a
+``ViTBCellViTPPContext`` checkpoint (cell-context attention) builds that
+class, otherwise the B-3 ``ViTBCellViTPP`` (per-cell MLP). The rest of the
+pipeline is identical for both, since they share the per-cell logits
+contract — so the two compare directly in the same report format.
 
 Diverges from ``eval_full_v2_vitb.py`` only in the classification path:
 instead of taking the per-pixel argmax of an NC decoder branch and then
@@ -36,6 +42,7 @@ from cellvit.postproc.benchmarking import (
 from adios_cellvit.pannuke_dataset import ADIOSPanNukeDataset
 from adios_cellvit.vitb_backbone import load_vitb_encoder
 from adios_cellvit.vitb_cellvitpp_model import ViTBCellViTPP
+from adios_cellvit.vitb_cellvitpp_context_model import ViTBCellViTPPContext
 
 
 PANNUKE_CLASS_NAMES = {
@@ -126,18 +133,52 @@ def main():
     encoder, patch_size, num_registers, embed_dim = load_vitb_encoder(
         args.vitb_checkpoint, device,
     )
-    model = ViTBCellViTPP(
-        encoder=encoder,
-        patch_size=patch_size,
-        num_registers=num_registers,
-        encoder_dim=embed_dim,
-        num_cell_classes=config['num_cell_classes'],
-        classifier_hidden_dim=config['classifier_hidden_dim'],
-        classifier_dropout=config['classifier_dropout'],
-        drop_rate=0.1,
-    ).to(device)
 
+    # Load the checkpoint first and build the model from the architecture that
+    # produced it (the checkpoint embeds its training config), so this one
+    # script evaluates both B-3 (per-cell MLP) and Stream A (cell-context
+    # attention) checkpoints. Falls back to the on-disk STAGE for any key the
+    # checkpoint didn't record.
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    ckpt_cfg = state.get('config', {})
+
+    def _cfg(key, default=None):
+        return ckpt_cfg.get(key, config.get(key, default))
+
+    is_context = (
+        ckpt_cfg.get('model_class') == 'ViTBCellViTPPContext'
+        or 'context_num_layers' in ckpt_cfg
+    )
+    if is_context:
+        model_label = 'ViTBCellViTPPContext'
+        model = ViTBCellViTPPContext(
+            encoder=encoder,
+            patch_size=patch_size,
+            num_registers=num_registers,
+            encoder_dim=embed_dim,
+            num_cell_classes=_cfg('num_cell_classes'),
+            classifier_hidden_dim=_cfg('classifier_hidden_dim'),
+            classifier_dropout=_cfg('classifier_dropout'),
+            context_num_layers=_cfg('context_num_layers', 2),
+            context_num_heads=_cfg('context_num_heads', 8),
+            context_dim_feedforward=_cfg('context_dim_feedforward', 2048),
+            drop_rate=0.1,
+        ).to(device)
+    else:
+        model_label = 'ViTBCellViTPP'
+        model = ViTBCellViTPP(
+            encoder=encoder,
+            patch_size=patch_size,
+            num_registers=num_registers,
+            encoder_dim=embed_dim,
+            num_cell_classes=_cfg('num_cell_classes'),
+            classifier_hidden_dim=_cfg('classifier_hidden_dim'),
+            classifier_dropout=_cfg('classifier_dropout'),
+            drop_rate=0.1,
+        ).to(device)
+    print(f'Model: {model_label} '
+          f'({"cell-context attention" if is_context else "per-cell MLP"} head)')
+
     model.load_state_dict(state['model_state_dict'])
     model.eval()
     n_params = sum(p.numel() for p in model.parameters())
@@ -368,7 +409,7 @@ def main():
     L = lines.append
 
     L('=' * 78)
-    L(f'  ViTBCellViTPP Evaluation Report (v3_cellvitpp)')
+    L(f'  {model_label} Evaluation Report (v3_cellvitpp)')
     L('=' * 78)
     L('')
 

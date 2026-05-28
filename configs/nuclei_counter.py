@@ -153,3 +153,57 @@ STAGE_CELLVITPP = {
         'w_nc':       1.0,
     },
 }
+
+# Stream A: ViT-B encoder + NP/HV CellViT branches + cell-context-attention
+# classifier. Identical to STAGE_CELLVITPP except the per-cell NC head: B-3's
+# pooled-token MLP -> a small transformer that lets cells in an image attend to
+# each other (2D positional encoding from centroids). This is the single
+# experimental delta vs B-3. Trained by ``train_vitb_cellvitpp_context.py``;
+# the model class is ``ViTBCellViTPPContext``.
+#
+# context_* knobs size the transformer (the experimental head).
+# classifier_hidden_dim / classifier_dropout now size the MLP head that sits
+# *after* attention. num_cell_classes stays 5 (foreground-only).
+#
+# loss_weights stay w_mse=2.5 / w_msge=8.0: Stream A is still single-dataset
+# PanNuke, so the known-good detection weights apply (the 1.0/1.0 start is only
+# for the 10-class multi-dataset Stream B, where MSGE x8 collapses rare classes).
+#
+# Placeholder tag (CONTEXT) is distinct from <FILL ON CLUSTER>, (VITB) and
+# (CELLVITPP) so assemble_cluster.sh PHASE E's substring match leaves it alone.
+STAGE_CELLVITPP_CONTEXT = {
+    'vitb_checkpoint':         '<FILL ON CLUSTER (CONTEXT)>',  # e.g. .../FMC_ViT-B_baseline/logs/checkpoint_iter_00150000.pth
+    'adios_checkpoint':        '<FILL ON CLUSTER (CONTEXT)>',  # same value as STAGE2['adios_checkpoint']; only needed when use_adios_consistency=True
+    'stage1_selector':         '<FILL ON CLUSTER (CONTEXT)>',  # trained stage-1 selector checkpoint; only needed when use_adios_consistency=True
+    'pannuke_path':            '<FILL ON CLUSTER (CONTEXT)>',  # same value as STAGE2['pannuke_path']
+    'output_dir':              '<FILL ON CLUSTER (CONTEXT)>',  # e.g. ./logs/cellvitpp_context
+    'magnification':           '40x',
+    'num_cell_classes':        5,    # foreground-only: 5 PanNuke classes
+    'classifier_hidden_dim':   384,  # width of the MLP head after attention
+    'classifier_dropout':      0.1,
+    # Cell-context attention knobs (the experimental delta vs B-3's MLP head).
+    'context_num_layers':      2,
+    'context_num_heads':       8,
+    'context_dim_feedforward': 2048,
+    'normalize_mean':          (0.6816, 0.5640, 0.7232),
+    'normalize_std':           (0.1617, 0.1714, 0.1389),
+    'val_split':               0.1,
+    'seed':                    42,
+    'num_workers':             4,
+    'epochs':                  100,
+    'batch_size':              16,
+    'encoder_lr':              1e-5,
+    'heads_lr':                1e-4,
+    'weight_decay':            1e-5,
+    'warmup_epochs':           2,
+    'early_stop_patience':     15,
+    'use_adios_consistency':   True,
+    'lambda_adios':            0.1,
+    'loss_weights': {
+        'w_xentropy': 1.0,
+        'w_dice':     1.0,
+        'w_mse':      2.5,
+        'w_msge':     8.0,
+        'w_nc':       1.0,
+    },
+}
