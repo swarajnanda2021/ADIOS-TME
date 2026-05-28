@@ -89,11 +89,16 @@ STAGE_VITB = {
     'early_stop_patience':   15,   # break loop if val_total hasn't improved in N epochs
     'use_adios_consistency': True,
     'lambda_adios':          0.1,
+    # HV-weight tuning: mirror STAGE2 (Path Z) and STAGE_CELLVITPP's
+    # known-working values. The original 1.0/1.0 defaults left val_mse
+    # pegged at ~0.0145 and produced under-detection (count bias -6 to -7
+    # cells/patch). MSGE in particular drives sharp HV-map boundaries
+    # that watershed needs for instance separation.
     'loss_weights': {
         'w_xentropy': 1.0,
         'w_dice':     1.0,
-        'w_mse':      1.0,
-        'w_msge':     1.0,
+        'w_mse':      2.5,
+        'w_msge':     8.0,
         'w_nc':       1.0,
     },
 }
