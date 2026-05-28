@@ -1,0 +1,68 @@
+==============================================================================
+  ViTBCellViT Evaluation Report (v2_vitb)
+==============================================================================
+
+--- Section 1: Setup ---
+  Checkpoint:       ./logs/vitb_pathb2/vitb_pathb2.pth
+  ViT-B encoder:    /data1/vanderbc/test_dinov2_swaraj/FMC_ViT-B_baseline/logs/checkpoint_iter_00150000.pth
+  Param count:      142,251,978
+  Test patches:     2722
+  Batch size:       8
+  Device:           cuda
+  IoU match thresh: 0.5
+  Eval time:        143.9s (0.05s/patch)
+
+--- Section 2: NP pixel-level metrics (binary nuclei map vs PanNuke) ---
+  GT-foreground pixels:          23,535,505
+  Predicted-foreground pixels:   24,263,282
+  Intersection:                  20,038,091
+  Predicted-only (extras):        4,225,191
+  GT-only (missed):               3,497,414
+
+  IoU:               0.7218
+  Recall:            0.8514
+  Precision:         0.8259
+  Extras-ratio:      0.1795
+
+--- Section 3: Instance metrics (post-watershed) ---
+  Mean GT count/patch:    19.84   (std 16.57)
+  Mean pred count/patch:  12.65   (std 9.70)
+  Count MAE (|pred-gt|):  7.35
+  Count bias (pred-gt):   -7.19
+  AJI:                    0.4072  +/- 0.1986
+
+  Instance PQ (global, IoU>=0.5 matching):
+    matched pairs (TP):    22256
+    unmatched pred (FP):   12177
+    unmatched GT   (FN):   31742
+    SQ (mean IoU on TPs):  0.7165
+    RQ (det F1-like):      0.5034
+    PQ (SQ x RQ):          0.3606
+
+  Per-class instance PQ:
+             class    TP    FP    FN       SQ       RQ       PQ
+        neoplastic  7010  6707 16050    0.729    0.381    0.278
+      inflammatory  4561  3428  4141    0.733    0.547    0.401
+        connective  3076  3859 11020    0.678    0.293    0.198
+              dead   157   466   683    0.687    0.215    0.147
+        epithelial  3182  1987  3966    0.719    0.517    0.371
+
+--- Section 4: Classification quality on matched instances (IoU > thresh) ---
+  Matched pairs:  22256
+
+  Per-class P/R/F1:
+             class     tp     fp     fn         P        R       F1
+        neoplastic   7010    751   1392     0.903    0.834    0.867
+      inflammatory   4561   1732    643     0.725    0.876    0.793
+        connective   3076    899   1737     0.774    0.639    0.700
+              dead    157    271     29     0.367    0.844    0.511
+        epithelial   3182    557    409     0.851    0.886    0.868
+  Macro-F1 (foreground only): 0.7481
+
+--- Section 5: Extras ---
+  Total extras: 12177 (4.47/patch); 0% predicted as background
+
+--- Section 6: Summary ---
+  Path A (PanNuke benchmark):  AJI=0.407  PQ=0.361  count_MAE=7.35
+  Path B (product use case):   NP recall=0.851  NP precision=0.826  NC macro-F1=0.748
+==============================================================================
