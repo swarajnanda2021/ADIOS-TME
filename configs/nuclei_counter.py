@@ -96,3 +96,48 @@ STAGE_VITB = {
         'w_nc':       1.0,
     },
 }
+
+# Path B-3: ViT-B encoder + NP/HV CellViT branches + per-cell MLP classifier
+# (CellViT++ style). Same training regime as STAGE_VITB so the only
+# experimental delta is the NC head architecture: per-pixel decoder ->
+# per-cell pooled-token MLP. Trained by ``train_vitb_cellvitpp.py``;
+# evaluated by ``eval_full_v3_cellvitpp.py``.
+#
+# num_cell_classes = 5: the MLP is foreground-only (neoplastic / inflammatory
+# / connective / dead / epithelial). Background is not a cell-level class.
+# CE target shifts modal-class {1..5} -> {0..4} inside the training loop.
+#
+# Placeholder tag (CELLVITPP) is distinct from <FILL ON CLUSTER> so
+# assemble_cluster.sh PHASE E's substring match doesn't try to substitute
+# these or crash on their presence. See HANDOFF_cellvitpp.md.
+STAGE_CELLVITPP = {
+    'vitb_checkpoint':       '<FILL ON CLUSTER (CELLVITPP)>',  # e.g. .../FMC_ViT-B_baseline/logs/checkpoint_iter_00150000.pth
+    'adios_checkpoint':      '<FILL ON CLUSTER (CELLVITPP)>',  # same value as STAGE2['adios_checkpoint']; only needed when use_adios_consistency=True
+    'stage1_selector':       '<FILL ON CLUSTER (CELLVITPP)>',  # trained stage-1 selector checkpoint; only needed when use_adios_consistency=True
+    'pannuke_path':          '<FILL ON CLUSTER (CELLVITPP)>',  # same value as STAGE2['pannuke_path']
+    'output_dir':            '<FILL ON CLUSTER (CELLVITPP)>',  # e.g. ./logs/cellvitpp
+    'magnification':         '40x',
+    'num_cell_classes':      5,  # foreground-only: 5 PanNuke classes
+    'classifier_hidden_dim': 384,
+    'classifier_dropout':    0.1,
+    'normalize_mean':        (0.6816, 0.5640, 0.7232),
+    'normalize_std':         (0.1617, 0.1714, 0.1389),
+    'val_split':             0.1,
+    'seed':                  42,
+    'num_workers':           4,
+    'epochs':                100,
+    'batch_size':            16,
+    'encoder_lr':            1e-5,
+    'heads_lr':              1e-4,
+    'weight_decay':          1e-5,
+    'warmup_epochs':         2,
+    'use_adios_consistency': True,
+    'lambda_adios':          0.1,
+    'loss_weights': {
+        'w_xentropy': 1.0,
+        'w_dice':     1.0,
+        'w_mse':      1.0,
+        'w_msge':     1.0,
+        'w_nc':       1.0,
+    },
+}
