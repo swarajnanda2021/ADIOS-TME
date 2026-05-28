@@ -534,6 +534,9 @@ def main():
     best_val_total = float('inf')
     best_state = None
     best_epoch = -1
+    epochs_since_improve = 0
+    patience = config.get('early_stop_patience', 15)
+    ckpt_path = os.path.join(config['output_dir'], 'cellvitpp.pth')
 
     for epoch in range(config['epochs']):
         train_log = run_epoch(model, criterion, train_loader, optimizer, device, train=True)
@@ -555,19 +558,32 @@ def main():
             best_val_total = val_log['total']
             best_state = copy.deepcopy(model.state_dict())
             best_epoch = epoch + 1
+            epochs_since_improve = 0
+            # Atomic incremental save: write to .tmp, then os.replace the
+            # final path.  After this line, Ctrl+C at any later epoch is
+            # safe — what's on disk is always the best-so-far checkpoint.
+            tmp_path = ckpt_path + '.tmp'
+            torch.save(
+                {
+                    'model_state_dict': best_state,
+                    'epoch': best_epoch,
+                    'val_total': best_val_total,
+                    'config': config,
+                },
+                tmp_path,
+            )
+            os.replace(tmp_path, ckpt_path)
+            print(f"  [new best @ ep {best_epoch}] saved {ckpt_path}")
+        else:
+            epochs_since_improve += 1
+            if epochs_since_improve >= patience:
+                print(f"[cellvitpp] early stop at epoch {epoch+1} "
+                      f"(no val improvement in {patience} epochs)")
+                break
 
-    ckpt_path = os.path.join(config['output_dir'], 'cellvitpp.pth')
-    torch.save(
-        {
-            'model_state_dict': best_state,
-            'epoch': best_epoch,
-            'val_total': best_val_total,
-            'config': config,
-        },
-        ckpt_path,
-    )
-    print(f"[cellvitpp] saved best to {ckpt_path}  best_val_total={best_val_total:.4f} "
-          f"@ epoch {best_epoch}")
+    print(f"[cellvitpp] training complete.  "
+          f"Best val_total={best_val_total:.4f} @ epoch {best_epoch}.  "
+          f"Saved to {ckpt_path}")
 
 
 if __name__ == '__main__':
