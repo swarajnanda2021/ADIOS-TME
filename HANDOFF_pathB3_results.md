@@ -24,27 +24,39 @@ consistent with the smaller effective per-batch loss footprint.
 
 ## Headline metrics
 
-| metric                | Path Z | B-2 +cons | **B-2 no-cons** | B-3 +cons | B-3 no-cons | B-2 + HV-fix |
-|-----------------------|--------|-----------|-----------------|-----------|-------------|--------------|
-| AJI                   | 0.448  | 0.407     | **0.481**       | 0.404     | 0.443       | 0.471        |
-| Instance PQ           | 0.426  | 0.361     | **0.448**       | 0.354     | 0.412       | 0.437        |
-| NP IoU                | 0.730  | 0.722     | 0.721           | 0.719     | 0.724       | 0.727        |
-| NP recall             | 0.858  | 0.851     | 0.863           | 0.850     | 0.858       | 0.860        |
-| NP precision          | 0.830  | 0.826     | 0.814           | 0.824     | 0.822       | 0.825        |
-| NC macro-F1           | 0.626  | **0.748** | 0.737           | 0.676     | 0.706       | 0.730        |
-| neoplastic recall     | 0.52   | 0.834     | 0.833           | 0.806     | 0.838       | 0.811        |
-| inflammatory recall   | 0.55   | 0.876     | 0.877           | 0.851     | 0.857       | 0.851        |
-| **connective recall** | 0.32   | 0.639     | 0.646           | 0.490     | 0.539       | **0.694**    |
-| dead recall           | 0.00   | 0.844     | 0.812           | 0.642     | 0.803       | 0.677        |
-| epithelial recall     | 0.50   | 0.886     | 0.870           | 0.894     | 0.870       | 0.883        |
-| count MAE             | 5.95   | 7.35      | 6.52            | 7.34      | 7.02        | **6.17**     |
-| count bias            | -5.85  | -7.19     | -6.41           | -7.23     | -6.94       | -6.04        |
-| matched pairs (TP)    | -      | 22256     | 27549           | 22123     | 25291       | 27588        |
+| metric                | Path Z | B-2 +cons | **B-2 no-cons** | B-3 +cons | B-3 no-cons | B-2 + HV-fix | Stream A 1/1 |
+|-----------------------|--------|-----------|-----------------|-----------|-------------|--------------|--------------|
+| HV w_mse/w_msge       | 2.5/8.0| 1.0/1.0   | 1.0/1.0         | 1.0/1.0   | 1.0/1.0     | 2.5/8.0      | 1.0/1.0      |
+| NC head               | px     | px        | px              | cell-MLP  | cell-MLP    | px           | cell-attn    |
+| AJI                   | 0.448  | 0.407     | **0.481**       | 0.404     | 0.443       | 0.471        | 0.438        |
+| Instance PQ           | 0.426  | 0.361     | **0.448**       | 0.354     | 0.412       | 0.437        | 0.391        |
+| NP IoU                | 0.730  | 0.722     | 0.721           | 0.719     | 0.724       | 0.727        | 0.712        |
+| NP recall             | 0.858  | 0.851     | 0.863           | 0.850     | 0.858       | 0.860        | 0.857        |
+| NP precision          | 0.830  | 0.826     | 0.814           | 0.824     | 0.822       | 0.825        | 0.808        |
+| NC macro-F1           | 0.626  | **0.748** | 0.737           | 0.676     | 0.706       | 0.730        | 0.661        |
+| neoplastic recall     | 0.52   | 0.834     | 0.833           | 0.806     | 0.838       | 0.811        | 0.768        |
+| inflammatory recall   | 0.55   | 0.876     | 0.877           | 0.851     | 0.857       | 0.851        | 0.737        |
+| **connective recall** | 0.32   | 0.639     | 0.646           | 0.490     | 0.539       | **0.694**    | 0.582        |
+| dead recall           | 0.00   | 0.844     | 0.812           | 0.642     | 0.803       | 0.677        | 0.783        |
+| epithelial recall     | 0.50   | 0.886     | 0.870           | 0.894     | 0.870       | 0.883        | 0.827        |
+| count MAE             | 5.95   | 7.35      | 6.52            | 7.34      | 7.02        | **6.17**     | 5.48         |
+| count bias            | -5.85  | -7.19     | -6.41           | -7.23     | -6.94       | -6.04        | -5.13        |
+| matched pairs (TP)    | -      | 22256     | 27549           | 22123     | 25291       | 27588        | 25853        |
 
-**Best of the six: still B-2 no-cons by a hair on AJI/PQ.** B-2 + HV-fix
-is within ±0.01 of B-2 no-cons on every macro metric — essentially a
-tie on PanNuke, with a small per-class redistribution (connective
-recall lifted +0.048, dead recall regressed -0.135).
+(`px` = per-pixel NC decoder; `cell-MLP` = per-cell pooled-token MLP;
+`cell-attn` = per-cell + cell-context attention. The HV row exposes the
+one-variable discipline — only same-HV columns are clean comparisons.)
+
+**Best of the seven: still B-2 no-cons.** B-2 + HV-fix ties it on macro
+metrics (±0.01) with a per-class redistribution (connective +0.048, dead
+−0.135). **Stream A (cell-context attention) is a net regression**: at
+matched 1.0/1.0 weights its macro-F1 (0.661) is below the plain per-cell
+MLP (B-3 no-cons, 0.706) and the per-pixel winner (0.737), and it did not
+recover connective (F1 0.599 < MLP 0.622) — it over-predicts connective
+(precision −0.116) at the cost of inflammatory/epithelial. Per-cell is
+abandoned per the pre-registered criterion. Stream A's first run (2.5/8.0)
+was confounded against the 1.0/1.0 baselines, so only the 1.0/1.0 column is
+a clean head comparison. Full analysis: HANDOFF_streamA_results.md.
 
 ## Findings
 

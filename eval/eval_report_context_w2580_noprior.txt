@@ -1,0 +1,96 @@
+==============================================================================
+  ViTBCellViTPPContext Evaluation Report (v3_cellvitpp)
+==============================================================================
+
+--- Section 1: Setup ---
+  Checkpoint:       ./logs/cellvitpp_context/cellvitpp_context.pth
+  ViT-B encoder:    /data1/vanderbc/test_dinov2_swaraj/FMC_ViT-B_baseline/logs/checkpoint_iter_00150000.pth
+  Param count:      153,576,907
+  Test patches:     2722
+  Batch size:       8
+  Device:           cuda
+  IoU match thresh: 0.5
+  Eval time:        153.2s (0.06s/patch)
+
+--- Section 2: NP pixel-level metrics ---
+  GT-foreground pixels:          23,535,505
+  Predicted-foreground pixels:   24,227,944
+  Intersection:                  20,132,813
+  Predicted-only (extras):        4,095,131
+  GT-only (missed):               3,402,692
+
+  IoU:               0.7286
+  Recall:            0.8554
+  Precision:         0.8310
+  Extras-ratio:      0.1740
+
+--- Section 3: Instance metrics (post-watershed) ---
+  Mean GT count/patch:    19.84   (std 16.57)
+  Mean pred count/patch:  14.11   (std 10.67)
+  Count MAE (|pred-gt|):  5.89
+  Count bias (pred-gt):   -5.73
+  AJI:                    0.4759  +/- 0.1877
+
+  Instance PQ (global, IoU>=0.5 matching):
+    matched pairs (TP):    27903
+    unmatched pred (FP):   10510
+    unmatched GT   (FN):   26095
+    SQ (mean IoU on TPs):  0.7212
+    RQ (det F1-like):      0.6039
+    PQ (SQ x RQ):          0.4355
+
+  Per-class instance PQ:
+             class    TP    FP    FN       SQ       RQ       PQ
+        neoplastic  9680  5826 13380    0.735    0.502    0.369
+      inflammatory  4510  3377  4192    0.738    0.544    0.401
+        connective  3647  4451 10449    0.688    0.329    0.226
+              dead   139   412   701    0.685    0.200    0.137
+        epithelial  3565  2806  3583    0.709    0.527    0.374
+
+  Count-error histogram:
+        <=-5:  1171  #####################
+      -4..-2:   772  ##############
+          -1:   288  #####
+           0:   344  ######
+          +1:   100  #
+      +2..+4:    43
+        >=+5:     4
+
+--- Section 4: Classification quality on matched instances (IoU > thresh) ---
+  Matched pairs:  27903
+
+  Confusion matrix (rows=GT, cols=Pred; only foreground classes):
+              | pred 0 | pred 1 | pred 2 | pred 3 | pred 4 | pred 5 |
+  ----------------------------------------------------------------------------
+    gt 1 neoplas |      0 |   9680 |    629 |   1001 |    218 |    364 |
+    gt 2 inflamm |      0 |    268 |   4510 |    666 |     20 |    192 |
+    gt 3 connect |      0 |    620 |   1172 |   3647 |     54 |    481 |
+    gt 4    dead |      0 |      6 |     35 |     23 |    139 |      4 |
+    gt 5 epithel |      0 |    230 |    137 |    166 |      0 |   3565 |
+
+  Per-class P/R/F1:
+             class     tp     fp     fn         P        R       F1
+        neoplastic   9680   1124   2212     0.896    0.814    0.853
+      inflammatory   4510   1973   1146     0.696    0.797    0.743
+        connective   3647   1856   2327     0.663    0.610    0.636
+              dead    139    292     68     0.323    0.671    0.436
+        epithelial   3565   1041    533     0.774    0.870    0.819
+  Macro-F1 (foreground only): 0.6973
+
+--- Section 5: Extras ---
+  Total extras across test set: 10510
+  Mean extras / patch:          3.86
+
+  MLP-predicted class on extras (cells are foreground-only, so no class-0 extras):
+    class 0    background:     0  (0.000)
+    class 1    neoplastic:  4674  (0.445)  ##########################
+    class 2  inflammatory:  1389  (0.132)  #######
+    class 3    connective:  2580  (0.245)  ##############
+    class 4          dead:   119  (0.011)
+    class 5    epithelial:  1748  (0.166)  #########
+
+--- Section 6: Summary ---
+  Path A (PanNuke benchmark):  AJI=0.476  PQ=0.436  count_MAE=5.89
+  Path B (product use case):   NP recall=0.855  NP precision=0.831  NC macro-F1=0.697
+
+==============================================================================
