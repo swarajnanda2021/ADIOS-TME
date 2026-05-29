@@ -165,9 +165,11 @@ STAGE_CELLVITPP = {
 # classifier_hidden_dim / classifier_dropout now size the MLP head that sits
 # *after* attention. num_cell_classes stays 5 (foreground-only).
 #
-# loss_weights stay w_mse=2.5 / w_msge=8.0: Stream A is still single-dataset
-# PanNuke, so the known-good detection weights apply (the 1.0/1.0 start is only
-# for the 10-class multi-dataset Stream B, where MSGE x8 collapses rare classes).
+# loss_weights = 1.0/1.0 to MATCH the B-3 no-cons baseline (logs/cellvitpp_noprior,
+# trained at 1.0/1.0) so the ONLY delta vs B-3 is the head (per-cell MLP ->
+# cell-context attention). This is a controlled ablation, so the 2.5/8.0 production
+# default does NOT apply: the first Stream A run used 2.5/8.0 against a 1.0/1.0
+# baseline and so could not separate the attention effect from the HV-weight effect.
 #
 # Placeholder tag (CONTEXT) is distinct from <FILL ON CLUSTER>, (VITB) and
 # (CELLVITPP) so assemble_cluster.sh PHASE E's substring match leaves it alone.
@@ -202,8 +204,8 @@ STAGE_CELLVITPP_CONTEXT = {
     'loss_weights': {
         'w_xentropy': 1.0,
         'w_dice':     1.0,
-        'w_mse':      2.5,
-        'w_msge':     8.0,
+        'w_mse':      1.0,
+        'w_msge':     1.0,
         'w_nc':       1.0,
     },
 }
